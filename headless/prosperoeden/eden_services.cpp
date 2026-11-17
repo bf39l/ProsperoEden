@@ -704,7 +704,7 @@ std::string EdenServices::version() {
     // "01.000.040" reads as v1.000.040.
     const char* text = Eden::kAppVersion;
     while (text[0] == '0' && text[1] != '.' && text[1] != '\0') ++text;
-    return std::string("v") + text;
+    return std::string("v") + text + "-fork";
 }
 
 std::vector<pe::ui::Game> EdenServices::games() {
