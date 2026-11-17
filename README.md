@@ -55,7 +55,7 @@ Local-wireless multiplayer through Eden rooms is new in v1.000.110 and experimen
 - **Your language** - the launcher follows the language the PS5 is set to (29 languages; English otherwise).
 - **Accessibility** - larger text, high contrast and reduced motion, in **Settings > Accessibility**.
 - **Save data in and out** - import a game's save from a folder or from a Ryujinx data folder, and export a copy (Triangle in the Library, then **Save data**).
-- **Game updates and DLC** - put update and DLC files (NSP or XCI) in the `updates` folder next to `roms`. They apply when the game starts, and each game's details show the update version and DLC count.
+- **Game updates and DLC** - put update and DLC files (NSP or XCI) in the `updates` folder next to `roms`, or alongside the base game in its own folder under `roms/`. They apply when the game starts, and each game's details show the update version and DLC count.
 - **Download sources** - the games on servers in your network, such as a [RomM](https://github.com/rommapp/romm) server, appear in the Library next to the ones on the console. A game is downloaded when you play it, or ahead of time through a download queue, and then runs from the console like any other: nothing is streamed. Downloads need an FTP server running on the console; see [Download sources](#download-sources).
 - **Save sync** - each profile can keep its save data on a server, such as a [RomM](https://github.com/rommapp/romm) server, as Steam does: it is synced before a game starts and after it ended, and when it changed on two devices you choose which one stays. A profile is paired with its server by a QR code, no typing. See [Save sync](#save-sync).
 - **Mods** - patches, replacement game files and cheats for a game, from a `mods` folder next to `roms`, each switched on or off in the game's settings (Triangle in the Library, then **Mods**).
@@ -94,7 +94,10 @@ Only these subfolders matter; the folder itself can have any name and location.
 │   └── *.nca                           # extracted firmware NCAs
 ├── roms/
 │   ├── Game.nsp
-│   └── Game.xci
+│   └── Other Game/
+│       ├── Other Game.xci
+│       ├── Other Game update.nsp
+│       └── Other Game DLC.nsp
 ├── updates/                            # optional: update and DLC files
 │   └── Game update.nsp
 ├── mods/                               # optional: mods, one folder per title ID
@@ -110,6 +113,8 @@ Only these subfolders matter; the folder itself can have any name and location.
 ├── save-export/                        # written by "Export a copy"
 └── .remote-downloads/                  # downloads that are not finished yet (see Download sources)
 ```
+
+The library lists games directly in `roms/` and one folder below it, skipping hidden folders. Keep a game's update and DLC alongside its base file, or put them in `updates/`, which is searched recursively. Package contents determine whether an NSP or XCI is a base game, an update, or DLC.
 
 The folder browser shows how many keys, firmware files, and games each folder holds, so you can check a folder before selecting it. Moving your files later only needs a new selection in Settings; saved settings, covers, and recently played games carry over.
 
