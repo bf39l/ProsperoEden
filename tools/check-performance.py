@@ -19,9 +19,9 @@ jit = (generated / 'a64_interface.cpp').read_text()
 block = jit.split('    CodePtr GetBlock(', 1)[1].split(
     '    void PerformRequestedCacheInvalidation', 1)[0]
 for statement in (
-    'A64::Translate(ir_block, arch_descriptor, get_code,',
+    'A64::Translate(ir_block, arch_descriptor, conf);',
     'Optimization::Optimize(ir_block, conf, polyfill_options);',
-    'const auto emitted = emitter.Emit(ir_block, false);',
+    'const auto emitted = emitter.Emit(ir_block);',
 ):
     assert statement in block
 

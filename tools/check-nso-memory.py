@@ -2,7 +2,17 @@ from pathlib import Path
 import subprocess,tempfile
 r=Path(__file__).resolve().parents[1]
 c=Path((r/'.local/headless-cache').read_text().strip())
-t=(c/'native-local/headless/nso.cpp').read_text()
+build = c / 'native-local'
+cache_key = 'CPM_PACKAGE_lz4_SOURCE_DIR:INTERNAL='
+lz4_source = next((line.removeprefix(cache_key)
+                   for line in (build / 'CMakeCache.txt').read_text().splitlines()
+                   if line.startswith(cache_key)), '')
+if not lz4_source:
+    raise SystemExit('The native build did not record a bundled LZ4 source directory in CMakeCache.txt')
+lz4 = Path(lz4_source) / 'lib'
+if not all((lz4 / name).is_file() for name in ('lz4.c', 'lz4.h')):
+    raise SystemExit(f'The native build’s bundled LZ4 sources are missing from {lz4}')
+t = (build / 'headless/nso.cpp').read_text()
 body=t[t.index('    const size_t module_start'):t.index('    // Apply patches if necessary')]
 zero=t[t.index('    // Initialize BSS and page padding directly'):t.index('    // Load codeset for current process')]
 code=r'''
@@ -85,6 +95,6 @@ int main(){
 '''
 with tempfile.TemporaryDirectory() as tmp:
  p=Path(tmp);(p/'test.cpp').write_text(code)
- subprocess.run(['g++','-std=c++20','-fsanitize=address,undefined','-g',str(p/'test.cpp'),'-I'+str(c/'source/.cache/cpm/lz4/ebb370ca83/lib'),str(c/'source/.cache/cpm/lz4/ebb370ca83/lib/lz4.c'),'-o',str(p/'test')],check=True)
+ subprocess.run(['g++','-std=c++20','-fsanitize=address,undefined','-g',str(p/'test.cpp'),'-I',str(lz4),str(lz4/'lz4.c'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True,timeout=20)
 print('Actual NSO loader: bounded staging, repeated huge BSS, direct zero/failure, patch/dump compatibility, compressed/raw bytes, args, invalid input PASS')
