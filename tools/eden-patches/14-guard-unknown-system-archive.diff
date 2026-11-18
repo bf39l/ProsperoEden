@@ -1,0 +1,14 @@
+--- a/src/core/file_sys/system_archive/system_archive.cpp
++++ b/src/core/file_sys/system_archive/system_archive.cpp
+@@ -76,6 +76,11 @@
+ 
+ VirtualFile SynthesizeSystemArchive(const u64 title_id) {
+     auto const desc = GetSystemArchive(title_id);
++    if (desc.name == nullptr) {
++        LOG_DEBUG(Service_FS, "No synthesized system archive for {:#016x}.", title_id);
++        return nullptr;
++    }
++
+     LOG_INFO(Service_FS, "Synthesizing system archive '{}' ({:#016x}).", desc.name, title_id);
+     if (desc.supplier != nullptr) {
+         if (auto const dir = desc.supplier(); dir != nullptr) {
