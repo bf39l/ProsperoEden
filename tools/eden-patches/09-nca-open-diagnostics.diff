@@ -1,0 +1,30 @@
+--- a/src/core/file_sys/content_archive.cpp
++++ b/src/core/file_sys/content_archive.cpp
+@@ -5,6 +5,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <cstdio>
+ #include <cstring>
+ #include <optional>
+ #include <utility>
+@@ -38,6 +39,9 @@
+ 
+     reader = std::make_shared<NcaReader>();
+     if (Result rc = reader->Initialize(file, GetCryptoConfiguration(), GetNcaCompressionConfiguration()); R_FAILED(rc)) {
++        std::fprintf(stderr, "[ProsperoEden] NCA header initialization failed: %s (module=%u, description=%u)\n",
++                     file->GetName().c_str(), static_cast<unsigned>(rc.GetModule()),
++                     static_cast<unsigned>(rc.GetDescription()));
+         status = Loader::ResultStatus::ErrorBadNCAHeader;
+         return;
+     }
+@@ -83,6 +87,9 @@
+     for (s32 i = 0; i < fs_count; i++) {
+         NcaFsHeaderReader header_reader;
+         if (Result rc = fs.OpenStorage(&filesystems[i], &header_reader, i); R_FAILED(rc)) {
++            std::fprintf(stderr, "[ProsperoEden] NCA section open failed: %s (section=%d, module=%u, description=%u)\n",
++                         file->GetName().c_str(), static_cast<int>(i), static_cast<unsigned>(rc.GetModule()),
++                         static_cast<unsigned>(rc.GetDescription()));
+             status = Loader::ResultStatus::ErrorBadNCAHeader;
+             return;
+         }

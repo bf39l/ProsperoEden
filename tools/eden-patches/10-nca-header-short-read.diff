@@ -1,0 +1,33 @@
+--- a/src/core/file_sys/fssystem/fssystem_aes_xts_storage.cpp
++++ b/src/core/file_sys/fssystem/fssystem_aes_xts_storage.cpp
+@@ -51,7 +51,8 @@
+     // Ensure buffer is valid and we can only read at block aligned offsets.
+     ASSERT(buffer != nullptr);
+     ASSERT(Common::IsAligned(offset, AesBlockSize) && Common::IsAligned(size, AesBlockSize));
+-    m_base_storage->Read(buffer, size, offset);
++    if (m_base_storage->Read(buffer, size, offset) != size)
++        return 0;
+ 
+     // Setup the counter.
+     std::array<u8, IvSize> ctr;
+--- a/src/core/file_sys/fssystem/fssystem_nca_reader.cpp
++++ b/src/core/file_sys/fssystem/fssystem_nca_reader.cpp
+@@ -80,12 +80,16 @@
+     R_UNLESS(work_header_storage != nullptr, ResultAllocationMemoryFailedInNcaReaderA);
+ 
+     // Read the header.
+-    work_header_storage->ReadObject(std::addressof(m_header), 0);
++    if (work_header_storage->ReadObject(std::addressof(m_header), 0) != sizeof(m_header)) {
++        return ResultReadNotPermitted;
++    }
+ 
+     // Validate the magic.
+     if (const Result magic_result = CheckNcaMagic(m_header.magic); R_FAILED(magic_result)) {
+         // Try to use a plaintext header.
+-        base_storage->ReadObject(std::addressof(m_header), 0);
++        if (base_storage->ReadObject(std::addressof(m_header), 0) != sizeof(m_header)) {
++            return ResultReadNotPermitted;
++        }
+         R_UNLESS(R_SUCCEEDED(CheckNcaMagic(m_header.magic)), magic_result);
+ 
+         // Configure to use the plaintext header.

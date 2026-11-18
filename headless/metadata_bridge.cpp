@@ -603,11 +603,16 @@ const char* eden_startup_error() {
                 ++count;
                 const auto file = vfs.OpenFile(entry.path().string(), FileSys::OpenMode::Read);
                 if (!file) return "A firmware NCA cannot be read. Reinstall the firmware dump.";
+                // Keys from a newer firmware can still contain the keys this archive needs.
                 FileSys::NCA nca(file);
-                if (nca.GetStatus() != Loader::ResultStatus::Success)
-                    return "Firmware NCA validation failed (code " +
-                        std::to_string(static_cast<unsigned>(nca.GetStatus())) +
+                if (nca.GetStatus() != Loader::ResultStatus::Success) {
+                    const std::string code = std::to_string(static_cast<unsigned>(nca.GetStatus()));
+                    const std::string detail = "Cannot validate firmware archive " +
+                        entry.path().filename().string() + " (code " + code + ").";
+                    Eden::Report("setup", detail.c_str());
+                    return "Firmware NCA validation failed (code " + code +
                         "). Check that firmware and prod.keys are compatible.";
+                }
                 if (nca.GetTitleId() == 0x0100000000000809ULL && nca.GetRomFS()) {
                     const auto romfs = FileSys::ExtractRomFS(nca.GetRomFS());
                     const auto file = romfs ? romfs->GetFile("file") : FileSys::VirtualFile{};

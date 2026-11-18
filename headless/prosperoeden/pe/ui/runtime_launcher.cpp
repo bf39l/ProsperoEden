@@ -172,7 +172,10 @@ struct RuntimeLauncher::Impl {
         if (auto* found = catalog.find(file)) return *found;
         throw std::runtime_error("Game is no longer in the library");
     }
-    void refresh() { if (!scan.valid()) scan = std::async(std::launch::async, [&] { return services.games(); }); }
+    void refresh() {
+        if (!scan.valid() && services.home().setup_ready)
+            scan = std::async(std::launch::async, [this] { return services.games(); });
+    }
     void discover() {
         installed.clear(); discovery_error.clear(); const auto root = data_root + "/launchers";
         std::string details;
@@ -696,7 +699,9 @@ struct RuntimeLauncher::Impl {
 
 RuntimeLauncher::RuntimeLauncher(Services& s, Textures& t, const Fonts& f, gfx::GlBatch& b, bool first, std::string root, audio::Mixer* m, std::function<void(gfx::Font&)> configure)
     : impl_(std::make_unique<Impl>(s,t,f,b,first,std::move(root),m,std::move(configure))) {
-    auto& h=*impl_; h.discover(); h.refresh(); std::string selected="builtin";
+    auto& h = *impl_;
+    h.discover();
+    std::string selected = "builtin";
     try { selected=read_json(h.data_root+"/config/launcher.json").value("selected","builtin"); }catch(...){}
     if(!h.last_error.empty()) selected="builtin";
     struct stat safe{}; if(stat((h.data_root+"/config/force-builtin-launcher").c_str(),&safe)==0) selected="builtin";

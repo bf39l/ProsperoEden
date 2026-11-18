@@ -537,6 +537,9 @@ int main(int argc, char** argv) {
         }
 #endif
 #endif
+        // The key manager caches its initial load. Set the active folder before any launcher
+        // services can construct it.
+        Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, Eden::AssetsPath("keys"));
         Common::FS::CreateEdenPaths();
         Eden::Performance::PlatformChecks();
         Common::Log::Initialize();

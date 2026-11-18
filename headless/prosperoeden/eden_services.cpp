@@ -637,6 +637,12 @@ pe::ui::Home EdenServices::home() {
         home.launch_failed = true;
     }
 
+    // The setup screen must open even if the selected library cannot be read.
+    if (!home.setup_ready) {
+        home.system_status = tr("Setup required");
+        return home;
+    }
+
     home.last_file = Eden::LoadLastGame();
     // A game no longer in the game files folder is not offered: the most recent one that is
     // takes its place (or none).
@@ -655,7 +661,7 @@ pe::ui::Home EdenServices::home() {
         std::string title = GameTitle(home.last_file);
         std::string cover = CoverPath(home.last_file);
         bool has_cover = Eden::FileExists(cover);
-        if (home.last_exists && home.setup_ready && !has_cover) {
+        if (home.last_exists && !has_cover) {
             cover = EnsureCover(home.last_file, &title);
             has_cover = !cover.empty();
         }
@@ -667,7 +673,7 @@ pe::ui::Home EdenServices::home() {
     }
     // The last game's update and DLC and the language it will use; when it does not offer the
     // chosen one, the caption says so.
-    if (home.setup_ready && home.last_exists) {
+    if (home.last_exists) {
         eden_scan_addons(Eden::AssetsPath("updates").c_str(), Eden::AssetsPath("roms").c_str(),
                          Eden::AssetsPath("keys").c_str());
         const uint64_t title_id = eden_game_title_id(last_path.c_str());
@@ -694,7 +700,7 @@ pe::ui::Home EdenServices::home() {
     const int installed = CountInstalledGames();
     home.system_status = fill(installed == 1 ? tr("{0} game installed") : tr("{0} games installed"),
                               {std::to_string(installed)}) +
-        "  /  " + (home.setup_ready ? tr("Firmware ready") : tr("Setup required"));
+        "  /  " + tr("Firmware ready");
     return home;
 }
 
