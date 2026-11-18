@@ -28,6 +28,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
+#include <limits>
 #include <thread>
 #include <bit>
 #include <new>
@@ -502,6 +504,7 @@ int main(int argc, char** argv) {
         }
         // A game that faulted early in its boot is restarted (at most four times per launch).
         std::string relaunch_game;
+        Service::AM::FrontendAppletParameters relaunch_params{};
         unsigned guest_fault_retries = 0;
 #ifdef EDEN_DEV_VULKAN
         std::string recovery_mode;
@@ -556,6 +559,7 @@ int main(int argc, char** argv) {
         }
 #endif
         std::string selected_game;
+        Service::AM::FrontendAppletParameters game_params{};
         Eden::Crash::SetSession("launcher", false);
 #ifdef PS5_NATIVE
         // A Vulkan session at 120 Hz handed the output back at 60 Hz as it closed; the launcher
@@ -575,6 +579,7 @@ int main(int argc, char** argv) {
 #endif
         if (!relaunch_game.empty()) {
             selected_game = std::exchange(relaunch_game, {});
+            game_params = std::exchange(relaunch_params, {});
         } else if (!forwarded_game.empty()) {
             guest_fault_retries = 0;
             forwarded_session = true;
@@ -1526,6 +1531,9 @@ int main(int argc, char** argv) {
                     bool room_lost = false;
                     std::exception_ptr failure;
                     std::string guest_fault;
+#ifdef PS5_NATIVE
+                    std::optional<s32> next_program;
+#endif
                 };
                 auto completion = std::make_shared<Completion>();
                 system.RegisterExitCallback([completion] {
@@ -1533,8 +1541,24 @@ int main(int argc, char** argv) {
                     completion->exited = true;
                     completion->wake.notify_one();
                 });
+#ifdef PS5_NATIVE
+                system.RegisterExecuteProgramCallback([completion](std::size_t index) {
+                    if (index > static_cast<std::size_t>(std::numeric_limits<s32>::max())) {
+                        Eden::Report("program switch", "Ignoring an out-of-range program index");
+                        return;
+                    }
+                    std::lock_guard lock(completion->mutex);
+                    completion->next_program = static_cast<s32>(index);
+                    completion->exited = true;
+                    completion->wake.notify_one();
+                });
+                std::optional<Service::AM::FrontendAppletParameters> next_program;
+#endif
                 SCOPE_EXIT {
                     if (system.IsPoweredOn()) system.ShutdownMainProcess();
+#ifdef PS5_NATIVE
+                    system.RegisterExecuteProgramCallback({});
+#endif
                     system.RegisterExitCallback({});
                 };
                 // Like Eden's Qt/Android frontends, reset shutdown state for each load.
@@ -1565,9 +1589,11 @@ int main(int argc, char** argv) {
                     applets.software_keyboard = std::make_unique<Eden::SystemKeyboardApplet>(Eden::AskSystemKeyboard);
                     system.GetFrontendAppletHolder().SetFrontendAppletSet(std::move(applets));
                 }
-                Service::AM::FrontendAppletParameters params{
-                    .applet_id = Service::AM::AppletId::Application,
-                };
+                Service::AM::FrontendAppletParameters params{};
+#ifdef PS5_NATIVE
+                params = game_params;
+#endif
+                params.applet_id = Service::AM::AppletId::Application;
 #ifdef PS5_NATIVE
                 // While a game loads nothing else reads the controller, so Touchpad + L1 did nothing
                 // until the game ran: a load that hung could only be left by closing ProsperoEden.
@@ -2024,6 +2050,15 @@ int main(int argc, char** argv) {
                     const bool guest_exited = completion->exited;
                     return_to_menu = completion->return_to_menu;
 #ifdef PS5_NATIVE
+                    if (completion->next_program && !return_to_menu && !completion->failure &&
+                        completion->guest_fault.empty() && !completion->room_lost) {
+                        next_program = Service::AM::FrontendAppletParameters{
+                            .program_id = system.GetApplicationProcessProgramID(),
+                            .launch_type = Service::AM::LaunchType::ApplicationInitiated,
+                            .program_index = *completion->next_program,
+                            .previous_program_index = params.program_index,
+                        };
+                    }
                     if (completion->room_lost)
                         launch_error = "The room connection was lost. Rejoin from Multiplayer before launching again.";
 #endif
@@ -2090,6 +2125,7 @@ int main(int argc, char** argv) {
                     if (game && session_seconds < 60 && guest_fault_retries < 4) {
                         ++guest_fault_retries;
                         relaunch_game = selected_game;
+                        relaunch_params = game_params;
                         return_to_menu = true;
                         LOG_WARNING(Frontend, "EDEN_GUEST_FAULT_RETRY {} after {:.1f} s: {}", guest_fault_retries,
                                     session_seconds, completion->guest_fault);
@@ -2115,6 +2151,16 @@ int main(int argc, char** argv) {
                     if (!captured) throw std::runtime_error("No completed game frame capture");
                 }
 #endif
+#endif
+#ifdef PS5_NATIVE
+                if (next_program && relaunch_game.empty()) {
+                    Eden::Report("program switch", std::format("Reloading program {} from program {}",
+                        next_program->program_index, next_program->previous_program_index).c_str());
+                    relaunch_game = selected_game;
+                    relaunch_params = *next_program;
+                    guest_fault_retries = 0;
+                    return_to_menu = true;
+                }
 #endif
                 if (game) LOG_INFO(Frontend, "EDEN_GAME_SESSION_END {}", cycle + 1);
             }
