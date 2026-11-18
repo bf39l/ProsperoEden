@@ -394,6 +394,7 @@ std::string RunApp(const std::string& launch_error, bool first_start, Eden::Mult
                 sceSystemServiceHideSplashScreen();
                 splash_hidden = true;
             }
+            if (running) launcher.frame_presented();
             {
                 // A slow launcher frame names its stage in the log, at most once a second.
                 const auto done = Clock::now();

@@ -3,6 +3,13 @@
 from pathlib import Path
 import sys
 
+CHEAT_SHUTDOWN = """        {
+            std::scoped_lock lock{cheat_engines_mutex};
+            cheat_engines.clear();
+        }
+"""
+
+
 def check(text):
     assert 'GameSettings::LoadOverrides(params.program_id,' in text
     assert 'GameSettings::LoadOverrides(program_id,' not in text
@@ -14,8 +21,9 @@ def check(text):
     offsets = [body.index(step) for step in steps]
     assert offsets == sorted(offsets), 'Audio callbacks outlive service owners'
     # The cheat engine's timer callback asks the service manager for HID: it is destroyed first.
-    assert body.index('cheat_engine.reset();') < body.index('kernel.CloseServices();'), \
-        'The cheat engine outlives the services'
+    assert body.count(CHEAT_SHUTDOWN) == 1, 'Missing or unlocked cheat engine shutdown'
+    assert body.index(CHEAT_SHUTDOWN) < body.index('kernel.CloseServices();'), \
+        'The cheat engines outlive the services'
 
 if __name__ == '__main__':
     fixed, original = (Path(name).read_text() for name in sys.argv[1:])
@@ -23,7 +31,9 @@ if __name__ == '__main__':
     for bad in (original, fixed.replace('GameSettings::LoadOverrides(params.program_id,',
             'GameSettings::LoadOverrides(program_id,'), fixed.replace('if (audio_core) audio_core->Shutdown();', '').replace(
             'services.reset();', 'services.reset();\nif (audio_core) audio_core->Shutdown();'),
-            fixed.replace('        cheat_engine.reset();\n', '', 1)):
+            fixed.replace(CHEAT_SHUTDOWN, '', 1),
+            fixed.replace(CHEAT_SHUTDOWN, '', 1).replace(
+                '        kernel.CloseServices();\n', '        kernel.CloseServices();\n' + CHEAT_SHUTDOWN, 1)):
         try:
             check(bad)
         except AssertionError:

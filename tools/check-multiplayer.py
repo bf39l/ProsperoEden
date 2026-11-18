@@ -28,8 +28,7 @@ def main():
             "-P", str(root / "headless/multiplayer_packets.cmake"),
         ], check=True)
         executable = output / "packets-check"
-        includes = [root / "headless", source / ".cache/cpm/fmt/12.1.0/include",
-                    source.parent / "fmt-12.1.0/include"]
+        includes = [root / "headless", root / ".deps/fmt-12.1.0/include"]
         subprocess.run([
             os.environ.get("CXX", "clang++"), "-std=c++20", "-g", "-O1",
             sanitizer, "-fno-omit-frame-pointer",
@@ -65,7 +64,7 @@ int main() {
             (output / "bsd_helpers.cpp").write_text(bsd.split("namespace {", 1)[1].split(
                 "} // Anonymous namespace", 1)[0])
             cache = args.host_cache.resolve()
-            fmt = cache / "source/.cache/cpm/fmt/12.1.0/include"
+            fmt = root / ".deps/fmt-12.1.0/include"
             enet = cache / "source/.cache/cpm/enet/v1.3.18/include"
             boost_version = json.loads((source / "cpmfile.json").read_text())["boost"]["version"]
             boost = sorted((cache / f"source/.cache/cpm/boost/{boost_version}/libs").glob("*/include"))

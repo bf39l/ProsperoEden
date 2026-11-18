@@ -9,7 +9,7 @@ make
 The first run fetches every dependency at its pinned revision, builds the RADV driver and
 Eden for the PS5, and writes the release files to `dist/`:
 
-- `ProsperoEden-vX.Y.Z.zip`: the `PPSA99008` folder to copy to `/data/homebrew/PPSA99008`;
+- `ProsperoEden-vX.Y.Z.zip`: the `PPSA99018` folder to copy to `/data/homebrew/PPSA99018`;
 - `SHA256SUMS` (the ZIP's checksum) and `release-notes.md`.
 
 The app package includes an exact-title one-shot helper built from the pinned upstream
@@ -38,16 +38,17 @@ already exists: the dependencies, this checkout's build cache in
 | Target | What it does |
 |---|---|
 | `make` / `make release` | Release files in `dist/` |
-| `make package` | Only the app folder, `build/release/PPSA99008` |
-| `make install PS5_HOST=<address>` | Copy `build/release/PPSA99008` to a console over FTP (close ProsperoEden first) |
-| `make dev DEV_TITLE=<title ID>` | Development build, `build/dev/PPSA99008` (or `EDEN_DEV_PACKAGE_DIR`): profiling counters, `dev-settings.txt` switches, boots the given title |
+| `make package` | Only the app folder, `build/release/PPSA99018` |
+| `make install PS5_HOST=<address>` | Copy `build/release/PPSA99018` to a console over FTP (close ProsperoEden first) |
+| `make dev DEV_TITLE=<title ID>` | Development build, `build/dev/PPSA99018` (or `EDEN_DEV_PACKAGE_DIR`): profiling counters, `dev-settings.txt` switches, boots the given title |
 | `make test` | Host (Linux) build of the emulator and its test suites |
 | `make deps` | Fetch missing dependencies at their pinned revisions |
 | `make deps-status` | List the dependencies, where they live and whether they match their pins |
 | `make prepare` | Everything besides Eden itself: build cache, FFmpeg, packaging tool, driver stub, RADV |
 | `make toolchain` | Check the host tools |
 | `make clean` | Remove `build/` and `dist/` |
-| `make distclean` | Also remove the fetched `.deps` and this checkout's build cache |
+| `make distclean` | Back the vendored dependencies up to `.vendor-backup`, then remove the fetched `.deps` and this checkout's build cache |
+| `make clean-vendor` | Remove the vendored dependency cache (`vendor/`) and its backup (`.vendor-backup/`) — the only clean that cannot be undone offline |
 
 `JOBS=<n>` sets the number of parallel compile jobs (default: all cores).
 
@@ -74,11 +75,15 @@ Every input is pinned in `tools/deps.json` and fetched by `make deps` (`tools/de
 it is missing: archives are checked against their SHA-256/SHA-512 before use and git
 repositories are fetched at their pinned commit. Nothing that already exists is modified, so a
 checkout you work in stays at whatever revision it has (`make deps-status` shows it).
-Downloads are cached in `~/.cache/prosperoeden-deps` (`PROSPEROEDEN_DEPS_CACHE`).
+Downloads and git snapshots are cached in the vendored folder `vendor/` (git-ignored;
+`PROSPEROEDEN_DEPS_CACHE` overrides it): archives under it and the tracked source of each git
+checkout as `vendor/git/*.bundle`. `make distclean` copies `vendor/` to `.vendor-backup/` before
+removing anything, so a clean never loses a working set and the build stays reproducible if an
+upstream repository disappears; `make clean-vendor` removes both.
 
 Inside this repository, in `.deps/`:
 
-- **Eden** at commit `67bada77f8a43a90da2e94e89b8e7da73c256989` (GitHub mirror archive), with
+- **Eden** at commit `d85bad89248fcae68f812d7e1c937436261404cb` (GitHub mirror archive), with
   Eden's own hash-pinned packages, which its configure step downloads. The PS5 frontend in
   `headless/` replaces and derives sources at configure time (`headless/inject.cmake`). This
   fork also patches a few of Eden's files when `make prepare` extracts them
@@ -109,6 +114,11 @@ The `libSceAgcDriver` import facade both drivers link against is built from
 `tools/stubs/libSceAgcDriver.c`. Small contracts from our research repositories are in
 `third_party/`.
 
+The self-update helper (`self-updater.elf`, the boilerplate's payload that replaces the app's
+files) is not built or shipped by default, since it needs a hosted signed catalog. Its check and
+download code stay in the tree; set `EDEN_SELF_UPDATE=ON` (a CMake option, also read from the
+`EDEN_SELF_UPDATE` environment variable) to build and ship it.
+
 ## Launcher
 
 The launcher (`headless/prosperoeden`) draws with OpenGL through the PS5 OpenGL SDK and plays its
@@ -137,7 +147,7 @@ What the PS5's home screen shows for the app is in `sce_sys/`, as it goes into t
 
 ## Host tools
 
-`make toolchain` checks them: `clang-18`, `lld-18` and the LLVM 18 tools, `cmake`, `ninja`,
+`make toolchain` checks them: `clang-21`, `lld-21` and the LLVM 21 tools, `cmake`, `ninja`,
 `ccache`, `make`, `nasm`, `meson`, `rsync`, `git`, `glslangValidator`, `spirv-val`, `bison`,
 `flex`, `curl`, `wget`, `unzip`, and Python 3.11 or later with `venv`, `mako` and `yaml`.
 
@@ -186,7 +196,7 @@ runner image carries (.NET, Android, GHC, parts of the tool cache) for
 disk space, and builds with as many jobs as the runner has cores (`JOBS`, and `RADV_BUILD_JOBS`
 for RADV, whose build otherwise runs 24).
 
-Between runs it caches the downloads (`PROSPEROEDEN_DEPS_CACHE`, keyed on `tools/deps.json`),
+Between runs it caches the vendored downloads (`vendor/`, or `PROSPEROEDEN_DEPS_CACHE`, keyed on `tools/deps.json`),
 ccache, and the built RADV driver with the SDK it is linked with (keyed on its pins and build
 scripts), so a later run compiles mostly what changed and takes about ten minutes. A run without
 these caches builds everything on four cores and takes about an hour. Should a build ever reach

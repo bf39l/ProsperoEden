@@ -18,26 +18,26 @@ scratch=$(cat .local/headless-cache)
 [[ "$scratch" == "$cache_parent"/ps5-eden-headless.* && "$(cat "$scratch/owner")" == "$root" ]]
 eden="$scratch/source"
 # As in prepare-build.sh: a tree unpacked from another archive is another Eden revision.
-if [[ ! -f "$eden/CMakeLists.txt" || $(cat "$eden/.unpacked-from" 2>/dev/null) != eden-67bada77.tar.gz ]]; then
+if [[ ! -f "$eden/CMakeLists.txt" || $(cat "$eden/.unpacked-from" 2>/dev/null) != eden-d85bad89.tar.gz ]]; then
     python3 - <<'PY'
 import hashlib, json, pathlib
-p = pathlib.Path('.deps/eden-67bada77.tar.gz')
+p = pathlib.Path('.deps/eden-d85bad89.tar.gz')
 assert hashlib.sha256(p.read_bytes()).hexdigest() == json.loads(pathlib.Path('UPSTREAM.json').read_text())['archives'][p.name]
 PY
     if [[ -d $eden/.cache ]]; then rm -rf "$scratch/source-cache" && mv "$eden/.cache" "$scratch/source-cache"; fi
     rm -rf "$eden"
     mkdir -p "$eden"
-    tar -xzf .deps/eden-67bada77.tar.gz --strip-components=1 -C "$eden"
+    tar -xzf .deps/eden-d85bad89.tar.gz --strip-components=1 -C "$eden"
     if [[ -d $scratch/source-cache ]]; then mv "$scratch/source-cache" "$eden/.cache"; fi
-    printf '%s\n' eden-67bada77.tar.gz > "$eden/.unpacked-from"
+    printf '%s\n' eden-d85bad89.tar.gz > "$eden/.unpacked-from"
 fi
-printf '%s\n' '67bada77f8a43a90da2e94e89b8e7da73c256989' > "$eden/GIT-COMMIT"
+printf '%s\n' 'd85bad89248fcae68f812d7e1c937436261404cb' > "$eden/GIT-COMMIT"
 printf '%s\n' 'ps5-headless' > "$eden/GIT-REFSPEC"
 # FFmpeg links configure probes through the compiler driver, not raw ld.
 # Keep the derivative in our cache and regenerate its Makefile when it changes.
 python3 - "$eden" "$scratch/build" <<'PY'
 import pathlib, sys
-source = pathlib.Path('.deps/mirror-67bada77f8a43a90da2e94e89b8e7da73c256989/externals/ffmpeg/CMakeLists.txt')
+source = pathlib.Path('.deps/mirror-d85bad89248fcae68f812d7e1c937436261404cb/externals/ffmpeg/CMakeLists.txt')
 text = source.read_text()
 for old, new in (
     ('--ld=${CMAKE_LINKER}', '--ld=${CMAKE_C_COMPILER}'),
@@ -52,13 +52,14 @@ if target.read_text() != text:
     (pathlib.Path(sys.argv[2]) / '_deps/ffmpeg-build/Makefile').unlink(missing_ok=True)
 PY
 cmake -S "$eden" -B "$scratch/build" -G Ninja \
-    -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+    -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 \
     -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DCMAKE_EXE_LINKER_FLAGS= -DEDEN_HOST_ASAN=OFF \
     -DCMAKE_PROJECT_yuzu_INCLUDE="$root/headless/inject.cmake" \
     -DENABLE_QT=OFF -DYUZU_CMD=OFF -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF \
     -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF -DENABLE_OPENGL=OFF -DENABLE_CUBEB=OFF \
     -DENABLE_WEB_SERVICE=OFF -DENABLE_LIBUSB=OFF -DYUZU_CRASH_DUMPS=OFF \
     -DYUZU_USE_EXTERNAL_FFMPEG=ON -DENABLE_WERROR=OFF -Dzstd_FORCE_BUNDLED=ON \
+    -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
     -DDYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=ON -DDYNARMIC_IGNORE_ASSERTS=OFF \
     -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_X11=OFF -DSDL_WAYLAND=OFF \
     -DSDL_OPENGL=OFF -DSDL_OPENGLES=OFF -DSDL_RENDER=OFF -DSDL_GPU=OFF

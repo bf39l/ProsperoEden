@@ -18,9 +18,9 @@ PS5_HOST ?=
 PS5_PORT ?= 2121
 
 PYTHON := python3 -B
-RELEASE_APP := build/release/PPSA99008
+RELEASE_APP := build/release/PPSA99018
 
-.PHONY: help release package dev prepare deps deps-status toolchain test install clean distclean
+.PHONY: help release package dev prepare deps deps-status toolchain test install clean distclean clean-vendor
 
 help: ## List the targets and variables
 	@echo 'ProsperoEden build - make [target] [VARIABLE=value]'
@@ -35,10 +35,10 @@ help: ## List the targets and variables
 release: package ## Release files in dist/: ZIP, SHA256SUMS, release notes (default)
 	$(PYTHON) tools/ci/make-dist.py $(RELEASE_APP)
 
-package: prepare ## Build the app as released: build/release/PPSA99008
+package: prepare ## Build the app as released: build/release/PPSA99018
 	bash tools/build-package.sh release
 
-dev: prepare ## Development build that boots DEV_TITLE: build/dev/PPSA99008
+dev: prepare ## Development build that boots DEV_TITLE: build/dev/PPSA99018
 	@[[ -n "$(DEV_TITLE)" ]] || { echo 'Set DEV_TITLE=<16-digit title ID> (or write it to .local/dev-profile-title)'; exit 2; }
 	bash tools/build-package.sh dev $(DEV_TITLE)
 
@@ -58,14 +58,14 @@ test: deps ## Host (Linux) build of the emulator and its test suites (ROMM_CHECK
 	bash tools/check-elevation-client.sh
 	bash tools/build-headless-host.sh
 
-install: ## Copy build/release/PPSA99008 to a console over FTP (PS5_HOST=<address>)
+install: ## Copy build/release/PPSA99018 to a console over FTP (PS5_HOST=<address>)
 	@[[ -n "$(PS5_HOST)" ]] || { echo 'Set PS5_HOST=<console address>'; exit 2; }
 	$(PYTHON) tools/install-ftp.py $(PS5_HOST) $(RELEASE_APP) --port $(PS5_PORT)
 
 clean: ## Remove build outputs (build/, dist/); dependencies and the build cache stay
 	rm -rf build dist
 
-distclean: clean ## Also remove the fetched dependencies in .deps and this checkout's build cache
+distclean: clean ## Back the vendored dependencies up, then remove .deps and this checkout's build cache
 	$(PYTHON) tools/deps.py clean
 	@if [[ -f .local/headless-cache ]]; then \
 		cache=$$(cat .local/headless-cache); \
@@ -74,3 +74,6 @@ distclean: clean ## Also remove the fetched dependencies in .deps and this check
 		fi; \
 		rm -f .local/headless-cache; \
 	fi
+
+clean-vendor: ## Remove the vendored dependency cache (vendor/) and its backup (.vendor-backup/)
+	$(PYTHON) tools/deps.py clean-vendor

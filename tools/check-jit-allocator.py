@@ -175,7 +175,7 @@ with tempfile.TemporaryDirectory() as temp:
     cpp=Path(temp)/'check.cpp'; exe=Path(temp)/'check'
     cpp.write_text(source)
     for native_mock in (False, True):
-        subprocess.run(['clang++-18','-std=c++20','-O2','-I'+str(root/'headless'),
+        subprocess.run(['clang++-21','-std=c++20','-O2','-I'+str(root/'headless'),
             '-I'+str(scratch/'native-local/headless/include'),
             '-I'+str(scratch/'source/.cache/cpm/xbyak/v7.40.1'),str(cpp),
             *(['-DEDEN_JIT_ALIAS_NATIVE=1','-DPS5_NATIVE=1','-Wl,--wrap=mprotect'] if native_mock else []),

@@ -84,10 +84,30 @@ std::string changes_text(int changes)
 
 } // namespace
 
+void Launcher::frame_presented()
+{
+    if (screen_ != Screen::home || modal_shown_ != Modal::none || opening_on_ || done_ ||
+        initial_scan_requested_)
+        return;
+    if (scan_.valid() || games_loaded_)
+        return;
+    start_scan();
+}
+
 void Launcher::start_scan()
 {
     if (!scan_.valid() && home_.setup_ready)
-        scan_ = std::async(std::launch::async, [this] { return services_.games(); });
+    {
+        initial_scan_requested_ = true;
+        try
+        {
+            scan_ = std::async(std::launch::async, [this] { return services_.games(); });
+        }
+        catch (const std::exception &error)
+        {
+            sys::log("could not start game list scan: %s", error.what());
+        }
+    }
 }
 
 // A game's name as it is shown: with the characters a font has, the launcher's own or the
@@ -113,11 +133,11 @@ static std::string shown_name(const gfx::Font *font, const std::string &name, co
     return stem.empty() ? name : stem;
 }
 
-void Launcher::finish_scan(bool wait)
+void Launcher::finish_scan()
 {
     if (!scan_.valid())
         return;
-    if (!wait && scan_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    if (scan_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         return;
     try
     {
@@ -127,6 +147,11 @@ void Launcher::finish_scan(bool wait)
     {
         sys::log("game list: %s", error.what());
         games_loaded_ = true; // the list stays as it was
+    }
+    catch (...)
+    {
+        sys::log("game list: unexpected scan failure");
+        games_loaded_ = true;
     }
 }
 
@@ -158,6 +183,17 @@ void Launcher::apply_games(std::vector<Game> games)
         mode_.snap(selected_docked_ ? 0.0f : 1.0f);
     }
     name_home_games();
+    update_installed_game_count();
+}
+
+void Launcher::update_installed_game_count()
+{
+    if (!home_.setup_ready || !games_loaded_)
+        return;
+    const auto installed = std::count_if(games_.begin(), games_.end(),
+                                         [](const Game &game) { return !game.remote; });
+    home_.system_status = fill(installed == 1 ? tr("{0} game installed") : tr("{0} games installed"),
+                               {std::to_string(installed)}) + "  /  " + tr("Firmware ready");
 }
 
 void Launcher::name_home_games()
@@ -165,17 +201,39 @@ void Launcher::name_home_games()
     // Games carry their own names; until one has been read the home screen names it by its file.
     for (const Game &game : games_)
     {
+        if (game.remote)
+            continue;
         if (game.file == home_.last_file)
+        {
             home_.last_title = game.name;
+            home_.last_title_id = game.title_id;
+            home_.last_addons = game.addons;
+            home_.last_language = game.language;
+            home_.last_mods = game.mods;
+            home_.last_mods_on = game.mods_on;
+            if (!game.cover.empty())
+                home_.last_cover = game.cover;
+            if (!game.language_note.empty())
+            {
+                home_.last_caption = game.language_note;
+                home_.last_caption_warning = true;
+            }
+        }
         for (Recent &recent : home_.recents)
-            if (recent.file == game.file)
-                recent.title = game.name;
+        {
+            if (recent.file != game.file)
+                continue;
+            recent.title = game.name;
+            if (!game.cover.empty())
+                recent.cover = game.cover;
+        }
     }
 }
 
 void Launcher::read_home()
 {
     home_ = services_.home();
+    update_installed_game_count();
     home_.last_title = shown_name(fonts_.font, home_.last_title, home_.last_file);
     for (Recent &recent : home_.recents)
         recent.title = shown_name(fonts_.font, recent.title, recent.file);
@@ -226,6 +284,7 @@ bool Launcher::drop_missing_games()
     if (gone == games_.end())
         return false;
     games_.erase(gone, games_.end());
+    update_installed_game_count();
     // The selection stays on its game, or on the one that took its place.
     int index = std::min(library_.selected, std::max(0, static_cast<int>(games_.size()) - 1));
     for (int i = 0; i < static_cast<int>(games_.size()); ++i)
@@ -296,19 +355,12 @@ std::string Launcher::hertz(int refresh)
 
 void Launcher::enter_library()
 {
+    finish_scan();
     if (games_loaded_)
-    {
-        // Games copied to the console since the list was read appear in a moment; games taken
-        // away leave it at once.
-        finish_scan(false);
         drop_missing_games();
+    if (library_opened_ || games_.empty())
         start_scan();
-    }
-    else
-    {
-        start_scan();
-        finish_scan(true);
-    }
+    library_opened_ = true;
     library_.wrap = false;
     library_.reset(static_cast<int>(games_.size()), 0);
     refresh_selected_game();

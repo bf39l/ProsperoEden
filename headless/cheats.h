@@ -42,11 +42,11 @@ inline bool Runs(std::string_view mod, std::string_view cheat) {
 
 // A mod's cheat list as Eden parsed it, added to the game's: the first entry is the file's
 // master code, which always stays.
-template <typename Entries>
-void Append(Entries& out, const Entries& list, std::string_view mod) {
-    for (auto entry : list) {
+template <typename CheatList>
+void Append(CheatList& out, const CheatList& list, std::string_view mod) {
+    for (auto entry : list.cheats) {
         if (entry.cheat_id != 0 && entry.enabled) entry.enabled = Runs(mod, entry.definition.readable_name.data());
-        out.push_back(entry);
+        out.cheats.push_back(entry);
     }
 }
 } // namespace Eden::Cheats

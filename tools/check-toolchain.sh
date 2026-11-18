@@ -14,8 +14,8 @@ need() {
     printf '  %-28s MISSING (%s)\n' "$label" "$*"
     missing=$((missing + 1))
 }
-echo "Compilers and LLVM 18:"
-for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 llvm-ranlib-18 llvm-nm-18 llvm-readobj-18 llvm-objcopy-18; do need "$tool" "$tool"; done
+echo "Compilers and LLVM 21:"
+for tool in clang-21 clang++-21 ld.lld-21 llvm-ar-21 llvm-ranlib-21 llvm-nm-21 llvm-readobj-21 llvm-objcopy-21; do need "$tool" "$tool"; done
 echo "Build tools:"
 for tool in cmake ninja ccache make nasm meson rsync git; do need "$tool" "$tool"; done
 need glslangValidator glslangValidator

@@ -1,0 +1,73 @@
+--- a/src/core/file_sys/fssystem/fssystem_nca_file_system_driver.cpp
++++ b/src/core/file_sys/fssystem/fssystem_nca_file_system_driver.cpp
+@@ -30,6 +30,13 @@
+ 
+ constexpr inline s32 IntegrityDataCacheCountForMeta = 16;
+ constexpr inline s32 IntegrityHashCacheCountForMeta = 2;
++
++// An indirect-only patch references base data and has no patch payload to decrypt.
++bool IsIndirectOnlyPatch(const NcaPatchInfo& patch_info) {
++    return patch_info.indirect_offset == 0 && patch_info.indirect_size > 0 &&
++           patch_info.aes_ctr_ex_offset == patch_info.indirect_size &&
++           patch_info.aes_ctr_ex_size == 0;
++}
+ 
+ class SharedNcaBodyStorage : public IReadOnlyStorage {
+ private:
+@@ -143,6 +150,9 @@
+ 
+     // Process patch layer.
+     const auto& patch_info = out_header_reader->GetPatchInfo();
++    const bool indirect_only_patch = out_header_reader->ExistsPatchMetaHashLayer() &&
++        out_header_reader->GetEncryptionType() == NcaFsHeader::EncryptionType::AesCtrEx &&
++        IsIndirectOnlyPatch(patch_info);
+     VirtualFile patch_meta_aes_ctr_ex_meta_storage;
+     VirtualFile patch_meta_indirect_meta_storage;
+     if (out_header_reader->ExistsPatchMetaHashLayer()) {
+@@ -197,8 +207,8 @@
+             ctx->fs_data_storage = storage;
+         }
+     } else {
+-        // Create the appropriate storage for the encryption type.
+-        if (!is_pre_decrypted) {
++        // The verified metadata is already decrypted. An indirect-only patch has no data layer.
++        if (!is_pre_decrypted && !indirect_only_patch) {
+             switch (out_header_reader->GetEncryptionType()) {
+             case NcaFsHeader::EncryptionType::None:
+                 // If there's no encryption, use the base storage we made previously.
+@@ -1081,7 +1091,8 @@
+     ASSERT(Common::IsAligned<s64>(patch_info.aes_ctr_ex_size, NcaHeader::XtsBlockSize));
+ 
+     // Validate patch info extents.
+-    R_UNLESS(patch_info.aes_ctr_ex_size >= 0 && patch_info.HasAesCtrExTable(), ResultInvalidNcaPatchInfoAesCtrExSize);
++    R_UNLESS(patch_info.aes_ctr_ex_size > 0 || IsIndirectOnlyPatch(patch_info),
++             ResultInvalidNcaPatchInfoAesCtrExSize);
+     R_UNLESS(patch_info.indirect_size > 0 && patch_info.HasIndirectTable(), ResultInvalidNcaPatchInfoIndirectSize);
+     R_UNLESS(patch_info.indirect_size + patch_info.indirect_offset <= patch_info.aes_ctr_ex_offset,
+              ResultInvalidNcaPatchInfoAesCtrExOffset);
+@@ -1137,14 +1148,17 @@
+                                         patch_info.indirect_offset - patch_info.indirect_offset);
+     R_UNLESS(indirect_meta_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
+ 
+-    // Create the aes ctr ex meta storage.
+-    auto aes_ctr_ex_meta_storage =
+-        std::make_shared<OffsetVfsFile>(integrity_storage, patch_info.aes_ctr_ex_size,
+-                                        patch_info.aes_ctr_ex_offset - patch_info.indirect_offset);
+-    R_UNLESS(aes_ctr_ex_meta_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
+-
+-    // Set the output.
+-    *out_aes_ctr_ex_meta = std::move(aes_ctr_ex_meta_storage);
++    if (patch_info.HasAesCtrExTable()) {
++        auto aes_ctr_ex_meta_storage =
++            std::make_shared<OffsetVfsFile>(integrity_storage, patch_info.aes_ctr_ex_size,
++                                            patch_info.aes_ctr_ex_offset - patch_info.indirect_offset);
++        R_UNLESS(aes_ctr_ex_meta_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
++        *out_aes_ctr_ex_meta = std::move(aes_ctr_ex_meta_storage);
++    } else {
++        out_aes_ctr_ex_meta->reset();
++    }
++
++    // Set the verified indirect metadata.
+     *out_indirect_meta = std::move(indirect_meta_storage);
+     R_SUCCEED();
+ }

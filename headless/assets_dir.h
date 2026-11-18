@@ -17,7 +17,13 @@ namespace Eden {
 inline std::string ResolveAssetsDir() {
     const std::string legacy = AppFile("assets");
     if (!FilesystemAccess()) return kDefaultAssetsDir;
-    if (std::string saved = LoadSavedAssetsDir(); !saved.empty()) return saved;
+    if (std::string saved = LoadSavedAssetsDir(); !saved.empty()) {
+        struct stat info {};
+        if (stat(saved.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) return saved;
+        std::fprintf(stderr, "[ProsperoEden] settings: Game files folder unavailable: %s; using the default folder.\n",
+                     saved.c_str());
+        return kDefaultAssetsDir;
+    }
     const std::string keys = "/keys/prod.keys";
     if (!FileExists(kDefaultAssetsDir + keys) && FileExists(legacy + keys)) return legacy;
     return kDefaultAssetsDir;

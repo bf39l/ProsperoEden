@@ -1,0 +1,22 @@
+--- a/src/audio_core/adsp/apps/opus/opus_decode_object.h
++++ b/src/audio_core/adsp/apps/opus/opus_decode_object.h
+@@ -8,6 +8,8 @@
+ 
+ #include <opus.h>
+ 
++#include <type_traits>
++
+ #include "common/common_types.h"
+ 
+ namespace AudioCore::ADSP::OpusDecoder {
+--- a/src/audio_core/adsp/apps/opus/opus_multistream_decode_object.h
++++ b/src/audio_core/adsp/apps/opus/opus_multistream_decode_object.h
+@@ -8,6 +8,8 @@
+ 
+ #include <opus_multistream.h>
+ 
++#include <type_traits>
++
+ #include "common/common_types.h"
+ 
+ namespace AudioCore::ADSP::OpusDecoder {

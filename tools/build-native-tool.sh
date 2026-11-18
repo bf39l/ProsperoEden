@@ -8,7 +8,7 @@ template="$root/../ps5-native-app-boilerplate"
 native="$template/tooling/native"
 zlib="$template/.deps/native/zlib/root"
 mkdir -p "$root/build/host"
-clang++-18 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zlib/usr/include" \
+clang++-21 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zlib/usr/include" \
     "$native/native_app_builder.cpp" "$native/self_container.cpp" \
     "$native/elf_object.cpp" "$native/sce_module_writer.cpp" "$zlib/usr/lib/libz.a" \
     -o "$root/build/host/ps5-native-tool"

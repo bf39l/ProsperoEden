@@ -49,6 +49,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -291,12 +292,46 @@ inline Json Legacy(const std::string& folder) {
     return document;
 }
 
+// Keep valid settings when a section or a per-game entry has the wrong shape.
+inline void UseDefaultObject(Json& document, const char* key) {
+    const auto value = document.find(key);
+    if (value == document.end() || value->is_object()) return;
+    std::fprintf(stderr, "[ProsperoEden] settings: Invalid %s section; using defaults.\n", key);
+    *value = Json::object();
+}
+
+inline void NormalizeProfileSettings(Json& document) {
+    for (const char* key : {"video", "audio", "controls", "system", "accessibility", "launcher",
+                            "diagnostics", "performance", "library", "multiplayer", "games"})
+        UseDefaultObject(document, key);
+    if (auto games = document.find("games"); games != document.end()) {
+        for (const auto& [key, value] : games->items()) {
+            if (!value.is_object()) UseDefaultObject(*games, key.c_str());
+        }
+    }
+}
+
 // The whole settings file; the first read after an update builds it from the earlier text files.
 inline Json LoadWhole(const std::string& file) {
     std::string text;
     if (ReadFile(file, text)) {
         Json document = Json::parse(text, nullptr, false);
-        return document.is_object() ? document : Json::object();
+        if (!document.is_object()) {
+            std::fprintf(stderr, "[ProsperoEden] settings: Invalid JSON in %s; using defaults.\n", file.c_str());
+            return Json::object();
+        }
+        NormalizeProfileSettings(document);
+        UseDefaultObject(document, "profiles");
+        if (auto profiles = document.find("profiles"); profiles != document.end())
+            UseDefaultObject(*profiles, "users");
+        UseDefaultObject(document, "profile_settings");
+        if (auto profiles = document.find("profile_settings"); profiles != document.end()) {
+            for (auto& [key, value] : profiles->items()) {
+                UseDefaultObject(*profiles, key.c_str());
+                NormalizeProfileSettings(value);
+            }
+        }
+        return document;
     }
     Json document = Legacy(Folder(file));
     if (!document.empty()) {
@@ -405,7 +440,17 @@ inline bool Bool(const Json& document, const Json::json_pointer& at, bool fallba
     return document.contains(at) && document.at(at).is_boolean() ? document.at(at).get<bool>() : fallback;
 }
 inline int Int(const Json& document, const Json::json_pointer& at, int fallback) {
-    return document.contains(at) && document.at(at).is_number_integer() ? document.at(at).get<int>() : fallback;
+    if (!document.contains(at)) return fallback;
+    const auto& value = document.at(at);
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<Json::number_unsigned_t>();
+        if (number <= std::numeric_limits<int>::max()) return static_cast<int>(number);
+    } else if (value.is_number_integer()) {
+        const auto number = value.get<Json::number_integer_t>();
+        if (number >= std::numeric_limits<int>::min() && number <= std::numeric_limits<int>::max())
+            return static_cast<int>(number);
+    }
+    return fallback;
 }
 inline std::string String(const Json& document, const Json::json_pointer& at) {
     return document.contains(at) && document.at(at).is_string() ? document.at(at).get<std::string>() : std::string{};
@@ -1038,7 +1083,9 @@ inline bool SaveRecentGame(std::string_view name, const std::string& file = Sett
 // The saved game files folder, or empty when none is saved.
 inline std::string LoadSavedAssetsDir(const std::string& file = SettingsFile()) {
     const std::string value = Settings::String(Settings::Load(file), Settings::Json::json_pointer("/game_files"));
-    return ValidAssetsDir(value) ? value : std::string{};
+    if (value.empty() || ValidAssetsDir(value)) return value;
+    std::fprintf(stderr, "[ProsperoEden] settings: Invalid game files path; using the default folder.\n");
+    return {};
 }
 
 inline bool SaveAssetsDir(std::string_view directory, const std::string& file = SettingsFile()) {

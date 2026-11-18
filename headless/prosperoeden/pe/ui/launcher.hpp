@@ -36,6 +36,7 @@ class Launcher
     void press(Key key);
     void update(float dt);
     void draw(gfx::DrawList &list);
+    void frame_presented();
 
     // The sounds asked for since the last call.
     std::vector<audio::Cue> take_cues();
@@ -193,9 +194,12 @@ class Launcher
     // ---- library and game settings (library.cpp) ----
     // The game list is read beside the menu: reading every game takes a moment.
     void start_scan();
-    void finish_scan(bool wait);
+    bool initial_scan_requested_ = false;
+    bool library_opened_ = false;
+    void finish_scan();
     void apply_games(std::vector<Game> games);
     void name_home_games();
+    void update_installed_game_count();
     // The home screen's content, with its game's mods counted.
     void read_home();
     // A game's mods as its list has them: how many, and how many are switched on.

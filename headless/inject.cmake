@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Add our frontend after the pinned project's real core targets exist.
 set(EDEN_PORT_DIR "${CMAKE_CURRENT_LIST_DIR}")
+get_filename_component(EDEN_PORT_ROOT "${EDEN_PORT_DIR}/.." ABSOLUTE)
 function(add_eden_headless)
     include("${EDEN_PORT_DIR}/CMakeLists.txt")
 endfunction()
@@ -10,12 +11,15 @@ cmake_language(DEFER CALL add_eden_headless)
 # copy). This runs before any target exists, so the folder leads every include path: a source
 # file that saw the original would mix two ways of committing the same table.
 include_directories(BEFORE "${CMAKE_BINARY_DIR}/headless/sparse")
+# The frontend's own JSON is nlohmann/json (tools/deps.json). Eden dropped it for jacinth, so
+# this port fetches the single header itself and puts it on every include path, before any target
+# exists.
+include_directories(BEFORE "${EDEN_PORT_ROOT}/.deps/nlohmann-3.12.0/single_include")
 # The program names its sources in log lines and assertions. In a console build they are written
 # relative to the trees they come from (src/..., build/..., headless/...), not with the folders of
 # the machine that built it: a package must not carry those. Before any target exists, so it holds
 # for every one.
 if(PS5_NATIVE)
-    get_filename_component(EDEN_PORT_ROOT "${EDEN_PORT_DIR}/.." ABSOLUTE)
     add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}/="
                         "-ffile-prefix-map=${CMAKE_BINARY_DIR}/=build/"
                         "-ffile-prefix-map=${EDEN_PORT_ROOT}/=")

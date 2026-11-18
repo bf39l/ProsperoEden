@@ -640,6 +640,15 @@ int main() {
     assert(Eden::LoadPreferences(file).volume == 100 && Eden::LoadLastGame(file).empty());
     assert(Eden::SaveLastGame("Game.XCI", file) && Eden::LoadLastGame(file) == "Game.XCI");
 
+    // A malformed section must not block the next save or discard valid settings.
+    std::ofstream(file) << R"({"video": false, "library": [], "audio": {"volume": 72},
+        "games": {"0100000000010000": false}, "profiles": {"users": []}})";
+    assert(Eden::LoadPreferences(file).volume == 72);
+    assert(Eden::SaveLastGame("Game.XCI", file));
+    assert(Eden::LoadLastGame(file) == "Game.XCI" && Eden::LoadPreferences(file).volume == 72);
+    std::ofstream(file) << R"({"audio": {"volume": 4294967368}})";
+    assert(Eden::LoadPreferences(file).volume == 100);
+
     // Migration from the text files of earlier versions, once, leaving them in place.
     char legacy[] = "/tmp/eden-legacy-XXXXXX";
     assert(mkdtemp(legacy));

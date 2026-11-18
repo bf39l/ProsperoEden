@@ -1,0 +1,28 @@
+--- a/src/common/net/net.cpp
++++ b/src/common/net/net.cpp
+@@ -114,10 +114,10 @@
+     auto res = hydro::get(url, opts);
+ 
+     if (!res) {
+-        LOG_ERROR(Frontend, "Failed to download {}: {}", url, res.error());
++        LOG_ERROR(Frontend, "Failed to download {}: {}", url, std::to_underlying(res.error()));
+         return std::nullopt;
+     } else if (res->status_code < hydro::Status::Ok || res->status_code >= hydro::Status::MultipleChoices) {
+-        LOG_ERROR(Frontend, "Received status code {} for {}", res->status_code, url);
++        LOG_ERROR(Frontend, "Received status code {} for {}", std::to_underlying(res->status_code), url);
+         return std::nullopt;
+     }
+ 
+@@ -192,10 +192,10 @@
+     auto res = hydro::head(url, opts);
+ 
+     if (!res) {
+-        LOG_ERROR(Frontend, "Failed to download {}: {}", url, res.error());
++        LOG_ERROR(Frontend, "Failed to download {}: {}", url, std::to_underlying(res.error()));
+         return false;
+     } else if (res->status_code < hydro::Status::Ok || res->status_code >= hydro::Status::MultipleChoices) {
+-        LOG_ERROR(Frontend, "Received status code {} for {}", res->status_code, url);
++        LOG_ERROR(Frontend, "Received status code {} for {}", std::to_underlying(res->status_code), url);
+         return false;
+     }
+ 

@@ -2,6 +2,21 @@
 
 What changed in each release of ProsperoEden, newest first. A release's notes on GitHub are its section here.
 
+## v26.011.018
+
+This release moves to Eden's current master and its newer toolchain, and installs under a new title ID so it does not replace another ProsperoEden build.
+
+### New and improved
+
+- **Eden updated to its latest master** (`d85bad89`), including its C++23 standard, `std::format` formatting and its `jacinth`/`hydrocarbon` modules.
+- **Newer toolchain.** The build now uses LLVM 21 (Eden's modules need Clang 19 or later) throughout: the emulator, FFmpeg and the RADV driver.
+- **New title ID (`PPSA99018`)** so this build installs beside, rather than over, other ProsperoEden releases.
+- **Vendored dependencies.** Downloads and git snapshots are cached in the git-ignored `vendor/` folder, so a clean rebuild works offline and survives an upstream repository disappearing; `make distclean` backs it up to `.vendor-backup/` first, and `make clean-vendor` removes it.
+
+### Changed
+
+- **Self-update helper not shipped by default.** The `self-updater.elf` payload is no longer built or included in the release, since it needs a hosted signed catalog; the check and download code remain in the tree (`EDEN_SELF_UPDATE=ON` to re-enable).
+
 ## v1.005.000
 
 This alpha keeps each game in a folder of its own with everything that belongs to it, gives cheats their own list, adds a speed limit and a second frame generation method, and fixes a lost graphics device and black boxes that spread over the picture. Performance and compatibility still vary by game.
@@ -161,7 +176,7 @@ And to everyone who tests ProsperoEden on their own console and reports what the
 - **Public rooms.** A list of the rooms in Eden's public directory, with each room's game, how many players it has and whether it asks for a password. Rooms you can join come first, the busiest at the top; Left and Right move a page at a time and Triangle refreshes. Rooms that use another protocol version are marked and cannot be joined.
 - **For a stable multiplayer session**, everyone needs the same game and the same update of it, and the player who hosts the lobby should use 1x resolution with frame generation off. A host that cannot hold full speed ends the session for everyone.
 - **Connection problems are explained.** When a room cannot be joined, a panel says what happened and what to try: a wrong password, a full room, a room that did not answer, a name already in use. **Settings > Diagnostics** has the detailed log to send with a report.
-- **Self-update keeps the version it replaces.** After an update, the previous version's files stay in `/data/prosperoeden/previous-version/PPSA99008-backup` until the next update. See [Going back to the previous version](INSTALL.md#going-back-to-the-previous-version).
+- **Self-update keeps the version it replaces.** After an update, the previous version's files stay in `/data/prosperoeden/previous-version/PPSA99018-backup` until the next update. See [Going back to the previous version](INSTALL.md#going-back-to-the-previous-version).
 - **One place for your data.** Settings, saves and covers are only ever in `/data/prosperoeden`. When ProsperoEden could not get access to the console's storage at a start, it used to carry on with empty settings and no saves, which looked as if they had been lost; it now says so on the home screen and starts no game. Keys, firmware and games that an early version kept inside the app's folder are moved to `/data/prosperoeden` at the first start, so that replacing the app cannot remove them.
 - **120 Hz holds on a display with a variable refresh rate.** With **Refresh rate** at 120 Hz, such a display was read as not having switched and the output went back to 60 Hz.
 - **No more lost graphics device in shader-heavy scenes.** Long scenes could stop a game with `VK_ERROR_DEVICE_LOST`; draws are now handed to the GPU in smaller batches. Contributed by [Bauls Deep](https://github.com/bawsdeep).
@@ -257,7 +272,7 @@ A bug fix for v1.000.090. If you are on v1.000.090, update.
 - **Crash reports.** If ProsperoEden stops because of an error, it writes `crash-<date>-<time>.txt` to `/data/prosperoeden/logs`, starts again and says on the home screen where the report is. That session's logs are kept beside it, and the five newest reports stay. A report holds what failed, where in the app's code, and what was running; it never holds the contents of memory.
 - The launcher and the OpenGL renderer use the PS5 OpenGL 4.6 SDK 1.0.0.
 - The graphics driver's shader cache moved to `/data/prosperoeden/cache`, so a read-only package install keeps it.
-- **Experimental: block list.** With an empty file named `block-list.txt` in `/data/homebrew/PPSA99008`, ProsperoEden saves which code a 64-bit game compiled and compiles it again on a spare CPU when the game next starts. In a repeat session of a large open-world game, the emulated cores then compiled 426 blocks during play instead of 138,262, and gameplay started at 30 FPS instead of 22. It is off by default until more games have run with it.
+- **Experimental: block list.** With an empty file named `block-list.txt` in `/data/homebrew/PPSA99018`, ProsperoEden saves which code a 64-bit game compiled and compiles it again on a spare CPU when the game next starts. In a repeat session of a large open-world game, the emulated cores then compiled 426 blocks during play instead of 138,262, and gameplay started at 30 FPS instead of 22. It is off by default until more games have run with it.
 
 ## v1.000.030
 

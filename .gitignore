@@ -4,3 +4,8 @@ dist/
 results/
 .local/
 __pycache__/
+vendor/
+.vendor-backup/
+/build.log
+.DS_Store
+debug/

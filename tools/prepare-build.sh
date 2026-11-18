@@ -22,7 +22,10 @@ scratch=$(cat .local/headless-cache)
 [[ "$(cat "$scratch/owner")" == "$root" ]] || { echo "Build cache $scratch belongs to another checkout" >&2; exit 1; }
 
 eden="$scratch/source"
-eden_archive=eden-67bada77.tar.gz
+eden_archive=eden-d85bad89.tar.gz
+# Eden's archive stores the source under one top-level directory; GNU tar's --wildcards is not
+# portable (bsdtar lacks it), so remember that directory and extract by exact path instead.
+eden_topdir=$(tar -tzf ".deps/$eden_archive" | sed -n '1s|/.*||p')
 # A tree unpacked from another archive is the source of another Eden revision: it is unpacked
 # again (Eden's package cache, downloads only, is kept). A tree left from before an update of
 # the pin was built as if it were the new one, and what Eden had changed went unseen.
@@ -35,7 +38,7 @@ if [[ ! -f $eden/CMakeLists.txt || $(cat "$eden/.unpacked-from" 2>/dev/null) != 
     if [[ -d $scratch/source-cache ]]; then mv "$scratch/source-cache" "$eden/.cache"; fi
     printf '%s\n' "$eden_archive" > "$eden/.unpacked-from"
 fi
-printf '%s\n' '67bada77f8a43a90da2e94e89b8e7da73c256989' > "$eden/GIT-COMMIT"
+printf '%s\n' 'd85bad89248fcae68f812d7e1c937436261404cb' > "$eden/GIT-COMMIT"
 printf '%s\n' 'ps5-headless' > "$eden/GIT-REFSPEC"
 # Fixes to Eden's own source (tools/eden-patches, in name order), each applied once: a patch that
 # reverses cleanly is already in the tree. One that neither reverses nor applies was changed after
@@ -45,8 +48,8 @@ for eden_patch in tools/eden-patches/*.diff; do
     if patch -d "$eden" -p1 -R --dry-run -s -f < "$eden_patch" >/dev/null 2>&1; then continue; fi
     step "Eden patch $(basename "$eden_patch")"
     if ! patch -d "$eden" -p1 -N --dry-run -s -f < "$eden_patch" >/dev/null 2>&1; then
-        sed -n 's|^+++ b/||p' "$eden_patch" | sed 's|^|*/|' |
-            xargs tar -xzf ".deps/$eden_archive" --wildcards --strip-components=1 -C "$eden"
+        sed -n 's|^+++ b/||p' "$eden_patch" | sed "s|^|$eden_topdir/|" |
+            xargs tar -xzf ".deps/$eden_archive" --strip-components=1 -C "$eden"
     fi
     patch -d "$eden" -p1 -N -s < "$eden_patch" || { echo "$eden_patch does not apply to Eden's source" >&2; exit 1; }
 done
