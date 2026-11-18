@@ -177,6 +177,18 @@ def fetch_git(item):
         if head != item['commit']:
             fail(f'{item["name"]}: fetched {head}, pinned {item["commit"]}')
         staging.rename(path)
+    # Files the item's own setup downloads from an unpinned or flaky location: fetch them through
+    # the verified download cache instead, and leave them where the setup expects to find them.
+    for seed in item.get('seeds', ()):
+        algorithm, expected = pinned_hash(seed)
+        name = pathlib.PurePosixPath(seed['url']).name
+        cached = download(seed['url'], algorithm, expected, name)
+        destination = path / seed['file']
+        if destination.exists() and digest(destination, algorithm) == expected:
+            continue
+        print(f'deps: seeding {item["name"]} {seed["file"]}', flush=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cached, destination)
     if 'setup' in item and not (path / item['setup_creates']).exists():
         print(f'deps: setting up {item["name"]}: {" ".join(item["setup"])}', flush=True)
         subprocess.run(item['setup'], cwd=path, check=True)
