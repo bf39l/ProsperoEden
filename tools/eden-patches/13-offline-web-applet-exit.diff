@@ -1,0 +1,20 @@
+--- a/src/core/hle/service/am/frontend/applet_web_browser.cpp
++++ b/src/core/hle/service/am/frontend/applet_web_browser.cpp
+@@ -319,6 +319,17 @@
+     }
+ 
+     if (Settings::values.disable_web_applet) {
++#if defined(__PROSPERO__)
++        // XCOM 2 retries the offline applet after the generic End button response.
++        // Match the default headless frontend's close response without opening a browser.
++        constexpr u64 xcom2_collection = 0x0100D0B00FB74000ULL;
++        if (web_arg_header.shim_kind == ShimKind::Offline &&
++            system.GetApplicationProcessProgramID() == xcom2_collection) {
++            LOG_INFO(Service_AM, "Closing XCOM 2 offline web applet with WindowClosed");
++            WebBrowserExit(WebExitReason::WindowClosed, "http://localhost/");
++            return;
++        }
++#endif
+         LOG_WARNING(Service_AM, "(STUBBED) called, Web Browser Applet is disabled. shim_kind={}",
+                     web_arg_header.shim_kind);
+         WebBrowserExit(WebExitReason::EndButtonPressed);
