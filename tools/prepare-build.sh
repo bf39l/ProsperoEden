@@ -23,6 +23,9 @@ scratch=$(cat .local/headless-cache)
 
 eden="$scratch/source"
 eden_archive=eden-d85bad89.tar.gz
+# Eden's archive stores the source under one top-level directory; GNU tar's --wildcards is not
+# portable (bsdtar lacks it), so remember that directory and extract by exact path instead.
+eden_topdir=$(tar -tzf ".deps/$eden_archive" | sed -n '1s|/.*||p')
 # A tree unpacked from another archive is the source of another Eden revision: it is unpacked
 # again (Eden's package cache, downloads only, is kept). A tree left from before an update of
 # the pin was built as if it were the new one, and what Eden had changed went unseen.
@@ -45,8 +48,8 @@ for eden_patch in tools/eden-patches/*.diff; do
     if patch -d "$eden" -p1 -R --dry-run -s -f < "$eden_patch" >/dev/null 2>&1; then continue; fi
     step "Eden patch $(basename "$eden_patch")"
     if ! patch -d "$eden" -p1 -N --dry-run -s -f < "$eden_patch" >/dev/null 2>&1; then
-        sed -n 's|^+++ b/||p' "$eden_patch" | sed 's|^|*/|' |
-            xargs tar -xzf ".deps/$eden_archive" --wildcards --strip-components=1 -C "$eden"
+        sed -n 's|^+++ b/||p' "$eden_patch" | sed "s|^|$eden_topdir/|" |
+            xargs tar -xzf ".deps/$eden_archive" --strip-components=1 -C "$eden"
     fi
     patch -d "$eden" -p1 -N -s < "$eden_patch" || { echo "$eden_patch does not apply to Eden's source" >&2; exit 1; }
 done

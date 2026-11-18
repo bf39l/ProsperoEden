@@ -786,6 +786,7 @@ std::vector<pe::ui::Game> EdenServices::games() {
     }
     std::sort(games.begin(), games.end(),
               [](const pe::ui::Game& a, const pe::ui::Game& b) { return a.name < b.name; });
+    Eden::Report("library", ("Scan complete: " + std::to_string(games.size()) + " titles.").c_str());
     return games;
 }
 

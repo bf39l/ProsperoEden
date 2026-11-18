@@ -86,7 +86,8 @@ std::string changes_text(int changes)
 
 void Launcher::frame_presented()
 {
-    if (opening_on_ || done_ || initial_scan_requested_)
+    if (screen_ != Screen::home || modal_shown_ != Modal::none || opening_on_ || done_ ||
+        initial_scan_requested_)
         return;
     if (scan_.valid() || games_loaded_)
         return;
@@ -147,6 +148,11 @@ void Launcher::finish_scan()
         sys::log("game list: %s", error.what());
         games_loaded_ = true; // the list stays as it was
     }
+    catch (...)
+    {
+        sys::log("game list: unexpected scan failure");
+        games_loaded_ = true;
+    }
 }
 
 void Launcher::apply_games(std::vector<Game> games)
@@ -177,6 +183,17 @@ void Launcher::apply_games(std::vector<Game> games)
         mode_.snap(selected_docked_ ? 0.0f : 1.0f);
     }
     name_home_games();
+    update_installed_game_count();
+}
+
+void Launcher::update_installed_game_count()
+{
+    if (!home_.setup_ready || !games_loaded_)
+        return;
+    const auto installed = std::count_if(games_.begin(), games_.end(),
+                                         [](const Game &game) { return !game.remote; });
+    home_.system_status = fill(installed == 1 ? tr("{0} game installed") : tr("{0} games installed"),
+                               {std::to_string(installed)}) + "  /  " + tr("Firmware ready");
 }
 
 void Launcher::name_home_games()
@@ -216,6 +233,7 @@ void Launcher::name_home_games()
 void Launcher::read_home()
 {
     home_ = services_.home();
+    update_installed_game_count();
     home_.last_title = shown_name(fonts_.font, home_.last_title, home_.last_file);
     for (Recent &recent : home_.recents)
         recent.title = shown_name(fonts_.font, recent.title, recent.file);
@@ -266,6 +284,7 @@ bool Launcher::drop_missing_games()
     if (gone == games_.end())
         return false;
     games_.erase(gone, games_.end());
+    update_installed_game_count();
     // The selection stays on its game, or on the one that took its place.
     int index = std::min(library_.selected, std::max(0, static_cast<int>(games_.size()) - 1));
     for (int i = 0; i < static_cast<int>(games_.size()); ++i)
@@ -339,7 +358,9 @@ void Launcher::enter_library()
     finish_scan();
     if (games_loaded_)
         drop_missing_games();
-    start_scan();
+    if (library_opened_ || games_.empty())
+        start_scan();
+    library_opened_ = true;
     library_.wrap = false;
     library_.reset(static_cast<int>(games_.size()), 0);
     refresh_selected_game();

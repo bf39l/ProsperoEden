@@ -1,0 +1,14 @@
+--- a/src/video_core/memory_manager.cpp
++++ b/src/video_core/memory_manager.cpp
+@@ -126,7 +126,10 @@
+         }
+         remaining_size -= page_size;
+     }
+-    kind_map.Map(gpu_addr, gpu_addr + size, kind);
++    {
++        std::unique_lock<std::mutex> lock(guard);
++        kind_map.Map(gpu_addr, gpu_addr + size, kind);
++    }
+     return gpu_addr;
+ }
+ 
