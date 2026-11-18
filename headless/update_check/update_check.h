@@ -47,7 +47,7 @@ extern "C"
  * networks that block that site. They hold the same answers. Each place has its own signed
  * manifest, because icon addresses inside the files name the place they are served from. */
 #define UPDATE_CHECK_API "https://" UPDATE_CHECK_HOST "/api/v1/"
-#define UPDATE_CHECK_MIRROR_API "https://bf39l.github.io/ps5-homebrew-catalog/api/v1/"
+#define UPDATE_CHECK_MIRROR_API "https://blackbearreloaded.github.io/ps5-homebrew-catalog/api/v1/"
 #define UPDATE_CHECK_ORIGINS 2
 #define UPDATE_CHECK_MAX_RESPONSE 65536u
 
