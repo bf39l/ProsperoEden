@@ -1308,6 +1308,25 @@ if(audio_shutdown_offset LESS 0)
 endif()
 string(REPLACE "${old_audio_shutdown}"
     "        if (audio_core) audio_core->Shutdown();\n${old_audio_shutdown}" system_source "${system_source}")
+# Eden now keeps multiple cheat engines. Stop their timing callbacks before closing HID services.
+set(cheat_shutdown [=[        {
+            std::scoped_lock lock{cheat_engines_mutex};
+            cheat_engines.clear();
+        }
+]=])
+set(old_cheat_shutdown [=[        // Before the services: the cheat tick still runs on the timing thread here, and reads the
+        // controllers through the service manager (it crashed in a freed mutex when a game with
+        // cheats was stopped). The tick takes the same lock, so a running one finishes first and
+        // the later ones find no engine.
+]=])
+string(APPEND old_cheat_shutdown "${cheat_shutdown}")
+string(FIND "${system_source}" "${old_cheat_shutdown}" cheat_shutdown_offset)
+if(cheat_shutdown_offset LESS 0)
+    message(FATAL_ERROR "Pinned cheat engine shutdown changed; review callback lifetime.")
+endif()
+string(REPLACE "${old_cheat_shutdown}" "" system_source "${system_source}")
+string(REPLACE "        kernel.CloseServices();" "${cheat_shutdown}        kernel.CloseServices();"
+    system_source "${system_source}")
 # Kernel intrusive lists refer into DeviceMemory even during failed Load unwind.
 # Declare the backing first so reverse member destruction releases it last.
 string(REPLACE "    std::optional<Core::DeviceMemory> device_memory;\n" "" system_source "${system_source}")
