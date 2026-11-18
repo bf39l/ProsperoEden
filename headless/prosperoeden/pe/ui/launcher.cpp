@@ -55,7 +55,6 @@ Launcher::Launcher(Services &services, Textures &textures, const Fonts &fonts, b
     detail_.snap(1.0f);
     cue(home_.launch_failed ? Cue::notify : first_start ? Cue::welcome : Cue::resume);
     opening_on_ = first_start && textures_.splash() != 0;
-    start_scan();
 }
 
 Launcher::~Launcher()
@@ -330,7 +329,7 @@ void Launcher::update(float dt)
             textures_.clear_game_backdrop();
     }
     textures_.pump(dt);
-    finish_scan(false);
+    finish_scan();
     poll_sources(dt);
     poll_save_sync(dt);
     poll_pairing(dt);

@@ -84,10 +84,29 @@ std::string changes_text(int changes)
 
 } // namespace
 
+void Launcher::frame_presented()
+{
+    if (opening_on_ || done_ || initial_scan_requested_)
+        return;
+    if (scan_.valid() || games_loaded_)
+        return;
+    start_scan();
+}
+
 void Launcher::start_scan()
 {
     if (!scan_.valid() && home_.setup_ready)
-        scan_ = std::async(std::launch::async, [this] { return services_.games(); });
+    {
+        initial_scan_requested_ = true;
+        try
+        {
+            scan_ = std::async(std::launch::async, [this] { return services_.games(); });
+        }
+        catch (const std::exception &error)
+        {
+            sys::log("could not start game list scan: %s", error.what());
+        }
+    }
 }
 
 // A game's name as it is shown: with the characters a font has, the launcher's own or the
@@ -113,11 +132,11 @@ static std::string shown_name(const gfx::Font *font, const std::string &name, co
     return stem.empty() ? name : stem;
 }
 
-void Launcher::finish_scan(bool wait)
+void Launcher::finish_scan()
 {
     if (!scan_.valid())
         return;
-    if (!wait && scan_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    if (scan_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         return;
     try
     {
@@ -165,11 +184,32 @@ void Launcher::name_home_games()
     // Games carry their own names; until one has been read the home screen names it by its file.
     for (const Game &game : games_)
     {
+        if (game.remote)
+            continue;
         if (game.file == home_.last_file)
+        {
             home_.last_title = game.name;
+            home_.last_title_id = game.title_id;
+            home_.last_addons = game.addons;
+            home_.last_language = game.language;
+            home_.last_mods = game.mods;
+            home_.last_mods_on = game.mods_on;
+            if (!game.cover.empty())
+                home_.last_cover = game.cover;
+            if (!game.language_note.empty())
+            {
+                home_.last_caption = game.language_note;
+                home_.last_caption_warning = true;
+            }
+        }
         for (Recent &recent : home_.recents)
-            if (recent.file == game.file)
-                recent.title = game.name;
+        {
+            if (recent.file != game.file)
+                continue;
+            recent.title = game.name;
+            if (!game.cover.empty())
+                recent.cover = game.cover;
+        }
     }
 }
 
@@ -296,19 +336,10 @@ std::string Launcher::hertz(int refresh)
 
 void Launcher::enter_library()
 {
+    finish_scan();
     if (games_loaded_)
-    {
-        // Games copied to the console since the list was read appear in a moment; games taken
-        // away leave it at once.
-        finish_scan(false);
         drop_missing_games();
-        start_scan();
-    }
-    else
-    {
-        start_scan();
-        finish_scan(true);
-    }
+    start_scan();
     library_.wrap = false;
     library_.reset(static_cast<int>(games_.size()), 0);
     refresh_selected_game();

@@ -214,25 +214,6 @@ std::string GameTitle(const std::string& filename) {
     return Eden::UsableName(saved) ? Eden::PlainName(saved) : CleanTitle(filename);
 }
 
-// The cached cover of a ROM, extracted from it when missing; empty when it has none.
-std::string EnsureCover(const std::string& filename, std::string* title = nullptr) {
-    const std::string cover = CoverPath(filename);
-    if (Eden::FileExists(cover) && !title) return cover;
-    const std::string rom = Eden::AssetsPath("roms/" + filename);
-    if (!Eden::FileExists(rom)) return {};
-    (void)mkdir(Eden::CoversDir().c_str(), 0777);
-    char extracted[513]{};
-    const int metadata = eden_extract_game_metadata(rom.c_str(), Eden::AssetsPath("keys").c_str(), cover.c_str(),
-                                                    extracted, sizeof(extracted));
-    if (metadata & EDEN_METADATA_TITLE) {
-        SaveTitle(filename, extracted);
-        if (title) *title = extracted;
-    }
-    if (metadata & EDEN_METADATA_COVER) return cover;
-    Eden::Report("cover", ("No cover extracted from " + filename).c_str());
-    return Eden::FileExists(cover) ? cover : std::string{};
-}
-
 // The names of the download sources, by their keys.
 std::map<std::string, std::string> SourceNames() {
     std::map<std::string, std::string> names;
@@ -276,6 +257,8 @@ bool AddOnInGameFolder(const std::string& path) {
     if (const auto found = seen.find(path);
         found != seen.end() && found->second.size == info.st_size && found->second.modified == info.st_mtime)
         return found->second.addon;
+    Eden::Report("library", ("Classifying " + path).c_str());
+    std::fflush(stderr);
     const int content = eden_rom_content(path.c_str(), Eden::AssetsPath("keys").c_str());
     const bool addon = content == EDEN_CONTENT_UPDATE || content == EDEN_CONTENT_DLC;
     seen[path] = {info.st_size, info.st_mtime, addon};
@@ -313,8 +296,6 @@ std::string GameFolderOf(const std::string& file) {
     const auto slash = file.find('/');
     return slash == std::string::npos ? std::string{} : Eden::AssetsPath("roms/" + file.substr(0, slash));
 }
-
-int CountInstalledGames() { return static_cast<int>(GameFiles().size()); }
 
 // The labels of a setting, in the player's language (tools/launcher/strings.py lists them).
 template <std::size_t N>
@@ -658,33 +639,12 @@ pe::ui::Home EdenServices::home() {
     const std::string last_path = Eden::AssetsPath("roms/" + home.last_file);
     home.last_exists = !home.last_file.empty() && IsFile(last_path);
     if (!home.last_file.empty()) {
-        std::string title = GameTitle(home.last_file);
-        std::string cover = CoverPath(home.last_file);
-        bool has_cover = Eden::FileExists(cover);
-        if (home.last_exists && !has_cover) {
-            cover = EnsureCover(home.last_file, &title);
-            has_cover = !cover.empty();
-        }
-        home.last_title = title;
+        home.last_title = GameTitle(home.last_file);
         home.last_caption = home.last_exists ? tr("Last game opened") :
                                                tr("ROM missing from the game files folder");
         home.last_caption_warning = !home.last_exists;
-        if (has_cover) home.last_cover = cover;
-    }
-    // The last game's update and DLC and the language it will use; when it does not offer the
-    // chosen one, the caption says so.
-    if (home.last_exists) {
-        eden_scan_addons(Eden::AssetsPath("updates").c_str(), Eden::AssetsPath("roms").c_str(),
-                         Eden::AssetsPath("keys").c_str());
-        const uint64_t title_id = eden_game_title_id(last_path.c_str());
-        const GameLanguage language = LanguageFor(last_path, title_id, Eden::PreferencesFor(title_id).language);
-        home.last_title_id = title_id;
-        home.last_addons = AddOnSummary(title_id);
-        home.last_language = language.label;
-        if (!language.note.empty()) {
-            home.last_caption = language.note;
-            home.last_caption_warning = true;
-        }
+        const std::string cover = CoverPath(home.last_file);
+        if (Eden::FileExists(cover)) home.last_cover = cover;
     }
 
     auto history = Eden::LoadRecentGames();
@@ -695,12 +655,10 @@ pe::ui::Home EdenServices::home() {
     }
     for (const auto& name : history) {
         if (!IsFile(Eden::AssetsPath("roms/" + name))) continue;
-        home.recents.push_back({name, GameTitle(name), EnsureCover(name)});
+        const std::string cover = CoverPath(name);
+        home.recents.push_back({name, GameTitle(name), Eden::FileExists(cover) ? cover : std::string{}});
     }
-    const int installed = CountInstalledGames();
-    home.system_status = fill(installed == 1 ? tr("{0} game installed") : tr("{0} games installed"),
-                              {std::to_string(installed)}) +
-        "  /  " + tr("Firmware ready");
+    home.system_status = tr("Firmware ready");
     return home;
 }
 
@@ -733,6 +691,8 @@ std::vector<pe::ui::Game> EdenServices::games() {
     (void)mkdir(Eden::CoversDir().c_str(), 0777);
     // Without a roms folder there are still the download sources' games.
     const std::vector<std::string> files = GameFiles();
+    Eden::Report("library", "Scanning game updates and add-ons.");
+    std::fflush(stderr);
     eden_scan_addons(Eden::AssetsPath("updates").c_str(), Eden::AssetsPath("roms").c_str(),
                      Eden::AssetsPath("keys").c_str());
     // The download sources' games, each title once: one that is on the console can be downloaded
@@ -764,6 +724,8 @@ std::vector<pe::ui::Game> EdenServices::games() {
             // The cover is replaced in one step: the menu may be loading the old one right now.
             const std::string cover = CoverPath(file);
             const std::string staged = cover + ".new";
+            Eden::Report("library", ("Reading metadata: " + file).c_str());
+            std::fflush(stderr);
             const int metadata = eden_extract_game_metadata(path.c_str(), Eden::AssetsPath("keys").c_str(),
                                                             staged.c_str(), title, sizeof(title));
             if (metadata & EDEN_METADATA_TITLE) {

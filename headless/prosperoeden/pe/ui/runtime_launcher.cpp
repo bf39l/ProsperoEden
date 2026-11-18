@@ -721,6 +721,9 @@ void RuntimeLauncher::press(Key key) {
     else if(h.builtin) { h.builtin->press(key); if(h.builtin->take_launcher_picker()) open_picker(); }
 }
 void RuntimeLauncher::update(float dt){impl_->update(dt);}
+void RuntimeLauncher::frame_presented() {
+    if (impl_->builtin) impl_->builtin->frame_presented();
+}
 void RuntimeLauncher::draw(gfx::DrawList& list){impl_->draw(list);}
 std::vector<audio::Cue> RuntimeLauncher::take_cues(){return impl_->builtin?impl_->builtin->take_cues():std::vector<audio::Cue>{};}
 int RuntimeLauncher::menu_volume()const{return impl_->cached_preferences.menu_volume;}

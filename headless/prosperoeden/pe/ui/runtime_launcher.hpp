@@ -17,6 +17,7 @@ public:
     void press(Key);
     void update(float);
     void draw(gfx::DrawList&);
+    void frame_presented();
     std::vector<audio::Cue> take_cues();
     int menu_volume() const;
     int output() const;

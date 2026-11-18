@@ -17,13 +17,32 @@
      * Writes a span of T data to a file sequentially.
 --- a/src/common/fs/file.cpp
 +++ b/src/common/fs/file.cpp
-@@ -537,6 +537,33 @@
+@@ -390,6 +390,6 @@
+         file = std::fopen(path.c_str(), AccessModeToStr(mode, type));
+     }
+-#elif defined(__HAIKU__) || defined(__managarm__) || defined(__OPENORBIS__) || defined(__APPLE__)
++#elif defined(__HAIKU__) || defined(__managarm__) || defined(__OPENORBIS__) || defined(__APPLE__) || defined(__PROSPERO__)
+     file = std::fopen(path.c_str(), AccessModeToStr(mode, type));
+ #elif defined(__unix__)
+     if (type == FileType::BinaryFile && mode == FileAccessMode::Read) {
+@@ -537,6 +537,44 @@
      return 0;
  }
  
 +size_t IOFile::ReadAt(void* data, size_t length, s64 offset) const {
-+    if (!IsOpen()) {
++    if (!IsOpen() || offset < 0 || length == 0) {
 +        return 0;
++    }
++    // Eden can open binary files using only a mapping, with no stdio handle.
++    if (IsMappedFile()) {
++        const auto position = static_cast<u64>(offset);
++        const auto size = GetSize();
++        if (position >= size) {
++            return 0;
++        }
++        const auto count = static_cast<size_t>(std::min<u64>(length, size - position));
++        std::memcpy(data, mmap_base + position, count);
++        return count;
 +    }
 +#ifdef _WIN32
 +    if (fseeko(file, offset, SEEK_SET) != 0) {
