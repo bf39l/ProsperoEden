@@ -44,7 +44,7 @@ int main() {
 with tempfile.TemporaryDirectory(prefix='eden-tsc-') as directory:
     path = Path(directory)
     (path / 'check.cpp').write_text(code)
-    subprocess.run(['clang++-18', '-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror',
+    subprocess.run(['clang++-21', '-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror',
                     str(path / 'check.cpp'), '-o', str(path / 'check')], check=True)
     subprocess.run([str(path / 'check')], check=True, timeout=5)
 print('Actual TSC selector: missing leaf/crystal/denominator, valid CPUID, noninvariant and rejected estimates PASS')

@@ -22,6 +22,7 @@
 #include "sdk_audit.h"
 #endif
 #include <filesystem>
+#include <format>
 #include <unistd.h>
 #include <condition_variable>
 #include <chrono>
@@ -185,7 +186,7 @@ public:
 }
 
 static void MigrateSandboxData() {
-    const std::filesystem::path sandbox{"/mnt/sandbox/PPSA99008_000/download0"};
+    const std::filesystem::path sandbox{"/mnt/sandbox/PPSA99018_000/download0"};
     const std::pair<std::filesystem::path, std::string> moves[] = {
         {sandbox / "eden-headless-g7/user", Eden::UserDir()},
         {sandbox / "prosperoeden/covers", Eden::CoversDir()},
@@ -354,7 +355,7 @@ int main(int argc, char** argv) {
         Eden::Crash::Install(Eden::LogsDir(), Eden::kAppVersion, last_crash.restarted);
         Eden::BootTrace::Ready(Eden::LogsDir(), Eden::FilesystemAccess());
         Eden::BootTrace::Line("logs and crash handler ready (%s)", Eden::LogsDir().c_str());
-        for (const char* folder : {"/app0", Eden::kMountedAppDir, Eden::kInstallDir, "/mnt/sandbox/PPSA99008_000/app0"})
+        for (const char* folder : {"/app0", Eden::kMountedAppDir, Eden::kInstallDir, "/mnt/sandbox/PPSA99018_000/app0"})
             Eden::BootTrace::Line("app folder candidate %s: eboot %s, font %s", folder,
                                   Eden::FileExists(std::string{folder} + "/eboot.bin") ? "yes" : "no",
                                   Eden::FileExists(std::string{folder} + "/ui/fonts/montserrat-medium.pefont") ? "yes" : "no");
@@ -1677,9 +1678,9 @@ int main(int argc, char** argv) {
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             if (tick % 50 != 0 || stop.stop_requested()) continue;
                             const std::string line = counted
-                                ? fmt::format("Shader cache: {} of {} pipelines built ({} s)",
+                                ? std::format("Shader cache: {} of {} pipelines built ({} s)",
                                               built.load(), total.load(), tick / 10)
-                                : fmt::format("Shader cache: reading ({} s)", tick / 10);
+                                : std::format("Shader cache: reading ({} s)", tick / 10);
                             Eden::Report("loader", line.c_str());
                         }
                     });
@@ -1702,7 +1703,7 @@ int main(int argc, char** argv) {
                     reporter.join();
                     const auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - load_start).count();
-                    Eden::Report("loader", fmt::format("Shader cache ready: {} pipelines in {} ms",
+                    Eden::Report("loader", std::format("Shader cache ready: {} pipelines in {} ms",
                                                        total.load(), load_ms).c_str());
                     std::puts("EDEN_SHADER_CACHE_LOADED");
                     std::fflush(stdout);
@@ -1731,9 +1732,9 @@ int main(int argc, char** argv) {
                     auto& memory = process->GetMemory();
                     if (const auto range = Eden::Watch::dump_range; range.size) {
                         for (u64 at = main_base + range.offset; at < main_base + range.offset + range.size; at += 0x40) {
-                            std::string line = fmt::format("EDEN_CRASH_CODE dump ret={:016X} from={:016X}:", at, at);
+                            std::string line = std::format("EDEN_CRASH_CODE dump ret={:016X} from={:016X}:", at, at);
                             for (u64 word = at; word < at + 0x40; word += 4)
-                                line += fmt::format(" {:08X}", memory.IsValidVirtualAddressRange(word, 4) ? memory.Read32(word) : 0u);
+                                line += std::format(" {:08X}", memory.IsValidVirtualAddressRange(word, 4) ? memory.Read32(word) : 0u);
                             LOG_CRITICAL(Core_ARM, "{}", line);
                         }
                     }

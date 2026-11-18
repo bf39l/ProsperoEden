@@ -1,0 +1,24 @@
+--- /dev/null
++++ b/.patch/hydrocarbon/0001-netinet.patch
+@@ -0,0 +1,10 @@
++--- a/modules/socket.ixx
+++++ b/modules/socket.ixx
++@@ -16,6 +16,7 @@
++ #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
++ #include <fcntl.h>
++ #include <arpa/inet.h>
++ #include <netdb.h>
+++#include <netinet/in.h>
++ #include <sys/select.h>
++ #include <sys/socket.h>
++ #include <sys/time.h>
+--- a/cpmfile.json
++++ b/cpmfile.json
+@@ -84,7 +84,8 @@
+     "hydrocarbon": {
+         "hash": "e08520daa8acc6dcb3c181b1311f3386858907965eca1df5ff70b9f2b729bdacec3b54e5c852e89864d3e5dde6f83eb2b14e8f601b11d6b21963386e0a051d93",
+         "min_version": "0.1.1",
++        "patches": ["0001-netinet.patch"],
+         "repo": "crueter/hydrocarbon",
+         "version": "f4ec2a3754"
+     },

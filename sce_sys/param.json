@@ -7,10 +7,10 @@
   "attribute": 0,
   "attribute2": 0,
   "attribute3": 4456512,
-  "conceptId": "99008",
+  "conceptId": "99018",
   "contentBadgeType": 1,
-  "contentId": "UP9000-PPSA99008_00-PROSPEROEDEN0001",
-  "contentVersion": "01.005.000",
+  "contentId": "UP9000-PPSA99018_00-PROSPEROEDEN0001",
+  "contentVersion": "26.011.018",
   "downloadDataSize": 256,
   "gameIntent": {
     "permittedIntents": [
@@ -36,6 +36,6 @@
   },
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
-  "titleId": "PPSA99008",
+  "titleId": "PPSA99018",
   "versionFileUri": ""
 }

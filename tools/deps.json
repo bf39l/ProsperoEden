@@ -5,11 +5,11 @@
       "name": "eden",
       "about": "Eden emulator source at the pinned commit (GitHub mirror archive)",
       "kind": "archive",
-      "url": "https://github.com/eden-emulator/mirror/archive/67bada77f8a43a90da2e94e89b8e7da73c256989.tar.gz",
-      "sha256": "d42b6fb492c65eb5e98ab72a786dff01fd64384d073a739b9c9ff475414366ee",
-      "save": ".deps/eden-67bada77.tar.gz",
+      "url": "https://github.com/eden-emulator/mirror/archive/d85bad89248fcae68f812d7e1c937436261404cb.tar.gz",
+      "sha256": "7491f0d7e6958c37bb7408f3b67ee05458671249bfdba83ab2ceb2a2f4df2084",
+      "save": ".deps/eden-d85bad89.tar.gz",
       "extract": ".deps",
-      "creates": ".deps/mirror-67bada77f8a43a90da2e94e89b8e7da73c256989/CMakeLists.txt"
+      "creates": ".deps/mirror-d85bad89248fcae68f812d7e1c937436261404cb/CMakeLists.txt"
     },
     {
       "name": "ffmpeg",
@@ -30,6 +30,20 @@
       "save": ".deps/fmt-12.1.0.tar.gz",
       "extract": ".deps",
       "creates": ".deps/fmt-12.1.0/include/fmt/format.h"
+    },
+    {
+      "name": "nlohmann",
+      "about": "nlohmann/json 3.12.0 single header (the frontend's own JSON: sources.json, save-sync, settings). Eden no longer ships it since its jacinth migration",
+      "kind": "files",
+      "dest": ".deps/nlohmann-3.12.0",
+      "creates": ".deps/nlohmann-3.12.0/single_include/nlohmann/json.hpp",
+      "files": [
+        {
+          "name": "single_include/nlohmann/json.hpp",
+          "url": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp",
+          "sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"
+        }
+      ]
     },
     {
       "name": "compiler-rt",

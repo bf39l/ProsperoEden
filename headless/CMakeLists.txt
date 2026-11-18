@@ -1,4 +1,5 @@
 option(EDEN_PS5_VULKAN "Build the native Vulkan renderer alongside OpenGL" OFF)
+option(EDEN_SELF_UPDATE "Build and ship the self-updater.elf helper (needs a hosted signed catalog)" OFF)
 set(EDEN_VULKAN_DRIVER "CUSTOM" CACHE STRING "Native Vulkan driver: CUSTOM or RADV")
 set_property(CACHE EDEN_VULKAN_DRIVER PROPERTY STRINGS CUSTOM RADV)
 if(NOT EDEN_VULKAN_DRIVER MATCHES "^(CUSTOM|RADV)$")
@@ -35,22 +36,6 @@ function(write_derived path content)
     file(WRITE "${path}.in" "${content}")
     configure_file("${path}.in" "${path}" COPYONLY)
 endfunction()
-# Eden's helper that hands a small vector on (FixSmallVectorADL, texture_cache/util.h) has two
-# forms: the vector itself, or - for a GCC 12 bug with an old Boost - a copy of it on the heap.
-# Boost's version chooses, and the header reads it without including <boost/version.hpp>: where
-# nothing else has, the version reads as 0 and the copy is made. That was every draw that follows
-# a guest write of GPU memory, every texture upload and every buffer copy: 2,300 of the GPU
-# thread's 3,400 allocations a frame in a large open-world game. With the include, the vector
-# itself (the bundled Boost is recent).
-file(READ "${PROJECT_SOURCE_DIR}/src/video_core/texture_cache/util.h" texture_util_header)
-string(REPLACE "#include <boost/container/small_vector.hpp>"
-    "#include <boost/container/small_vector.hpp>\n#include <boost/version.hpp>"
-    texture_util_derived "${texture_util_header}")
-if(texture_util_derived STREQUAL texture_util_header OR NOT texture_util_header MATCHES "FixSmallVectorADL")
-    message(FATAL_ERROR "Pinned texture cache util.h layout changed")
-endif()
-write_derived("${PORT_BUILD_DIR}/small-vector/video_core/texture_cache/util.h" "${texture_util_derived}")
-target_include_directories(video_core BEFORE PRIVATE "${PORT_BUILD_DIR}/small-vector")
 # Each Vulkan pipeline locks its own std::mutex and signals its own std::condition_variable once,
 # when its build ends, and keeps both while it is cached. On the PS5 those are thread library
 # objects, of which a process has only so many: a game with thousands of pipelines used them up
@@ -92,10 +77,10 @@ if(PS5_NATIVE)
     target_compile_options(video_core PRIVATE -flto=thin -march=znver2)
 endif()
 if(NOT PS5_NATIVE)
-    target_link_options(dynarmic INTERFACE -fuse-ld=lld-18)
+    target_link_options(dynarmic INTERFACE -fuse-ld=lld-21)
 endif()
 
-# Clang 18 does not accept the upstream GCC TLS-dialect flag. Use the same
+# Clang 21 does not accept the upstream GCC TLS-dialect flag. Use the same
 # compiler-rt emulated TLS configuration already qualified by G6 on PS5.
 # Linux must match its system libstdc++'s native TLS ABI.
 foreach(eden_target common core audio_core video_core hid_core network input_common frontend_common shader_recompiler gpu_logging dynarmic)
@@ -726,7 +711,7 @@ endif()
     set(jit_interface "${PROJECT_SOURCE_DIR}/src/dynarmic/src/dynarmic/backend/x64/a64_interface.cpp")
     file(READ "${jit_interface}" jit_source)
     if(PS5_NATIVE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        set(compile_begin "        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };")
+        set(compile_begin "        // LocationDescriptor ctor() does important ops (like tflags) do not skip")
         set(compile_end "        return emitter.Emit(ir_block).entrypoint;")
         string(FIND "${jit_source}" "${compile_begin}" begin)
         string(FIND "${jit_source}" "${compile_end}" end)
@@ -763,12 +748,12 @@ endif()
         endif()
         string(REPLACE "${compile_site}" "${compile_site}        struct EdenCompileTimer {\n            unsigned core;\n            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();\n            ~EdenCompileTimer() {\n                if (eden_jit_compile)\n                    eden_jit_compile(core, static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()));\n            }\n        } eden_compile_timer{unsigned(conf.processor_id)};\n" jit_source "${jit_source}")
         # Development: the compile phases of every block (eden_jit_phases).
-        set(phase_old "            A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});\n            Optimization::Optimize(ir_block, conf, polyfill_options);\n            const auto entrypoint = emitter.Emit(ir_block, false).entrypoint;")
+        set(phase_old "            A64::Translate(ir_block, arch_descriptor, conf);\n            Optimization::Optimize(ir_block, conf, polyfill_options);\n            const auto entrypoint = emitter.Emit(ir_block).entrypoint;")
         string(FIND "${jit_source}" "${phase_old}" phase_at)
         if(phase_at LESS 0)
             message(FATAL_ERROR "Pinned JIT compile batch changed.")
         endif()
-        string(REPLACE "${phase_old}" "            const auto eden_t0 = std::chrono::steady_clock::now();\n            A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});\n            const auto eden_t1 = std::chrono::steady_clock::now();\n            Optimization::Optimize(ir_block, conf, polyfill_options);\n            const auto eden_t2 = std::chrono::steady_clock::now();\n            const auto entrypoint = emitter.Emit(ir_block, false).entrypoint;\n            if (eden_jit_phases) {\n                const auto eden_ns = [](auto a, auto b) { return static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()); };\n                eden_jit_phases(unsigned(conf.processor_id), eden_ns(eden_t0, eden_t1), eden_ns(eden_t1, eden_t2), eden_ns(eden_t2, std::chrono::steady_clock::now()), descriptor.Value());\n            }" jit_source "${jit_source}")
+        string(REPLACE "${phase_old}" "            const auto eden_t0 = std::chrono::steady_clock::now();\n            A64::Translate(ir_block, arch_descriptor, conf);\n            const auto eden_t1 = std::chrono::steady_clock::now();\n            Optimization::Optimize(ir_block, conf, polyfill_options);\n            const auto eden_t2 = std::chrono::steady_clock::now();\n            const auto entrypoint = emitter.Emit(ir_block).entrypoint;\n            if (eden_jit_phases) {\n                const auto eden_ns = [](auto a, auto b) { return static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()); };\n                eden_jit_phases(unsigned(conf.processor_id), eden_ns(eden_t0, eden_t1), eden_ns(eden_t1, eden_t2), eden_ns(eden_t2, std::chrono::steady_clock::now()), descriptor.Value());\n            }" jit_source "${jit_source}")
         string(PREPEND jit_source "extern \"C\" void eden_jit_phases(unsigned core, unsigned long long translate, unsigned long long optimize, unsigned long long emit, unsigned long long location) __attribute__((weak));\n")
     endif()
     if(EDEN_SHARED_JIT)
@@ -1159,7 +1144,7 @@ if(EDEN_DEV_PROFILE)
     # Named-path filesystem requests (save data): the requesting guest thread and its
     # return chain, from its context saved at svcSendSyncRequest (boot-race probe).
     string(REPLACE "            ::Eden::Performance::RecordHle(service_name, ctx.GetCommand(), ::Eden::Performance::NowNs() - hle_start);\n"
-        "            ::Eden::Performance::RecordHle(service_name, ctx.GetCommand(), ::Eden::Performance::NowNs() - hle_start);\n            if (::Eden::Performance::trace_fs_callers.load(std::memory_order_relaxed) && std::string_view{service_name} == \"IFileSystem\") {\n                std::string frames;\n                for (const auto& entry : Core::GetBacktrace(&ctx.GetThread()))\n                    frames += fmt::format(\" {}+{:X}\", entry.module, entry.offset);\n                LOG_WARNING(Service_FS, \"EDEN_FS_CALLER command={} thread={} name={} frames={}\", ctx.GetCommand(),\n                            ctx.GetThread().GetThreadId(), Core::GetThreadName(&ctx.GetThread()).value_or(\"-\"), frames);\n            }\n"
+        "            ::Eden::Performance::RecordHle(service_name, ctx.GetCommand(), ::Eden::Performance::NowNs() - hle_start);\n            if (::Eden::Performance::trace_fs_callers.load(std::memory_order_relaxed) && std::string_view{service_name} == \"IFileSystem\") {\n                std::string frames;\n                for (const auto& entry : Core::GetBacktrace(&ctx.GetThread()))\n                    frames += std::format(\" {}+{:X}\", entry.module, entry.offset);\n                LOG_WARNING(Service_FS, \"EDEN_FS_CALLER command={} thread={} name={} frames={}\", ctx.GetCommand(),\n                            ctx.GetThread().GetThreadId(), Core::GetThreadName(&ctx.GetThread()).value_or(\"-\"), frames);\n            }\n"
         hle_source "${hle_source}")
     write_derived("${PORT_BUILD_DIR}/hle_service.cpp" "#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/arm/debug.h\"\n${hle_source}")
     list(REMOVE_ITEM core_sources "hle/service/service.cpp")
@@ -1323,17 +1308,6 @@ if(audio_shutdown_offset LESS 0)
 endif()
 string(REPLACE "${old_audio_shutdown}"
     "        if (audio_core) audio_core->Shutdown();\n${old_audio_shutdown}" system_source "${system_source}")
-# The cheat engine's looping timing event reads HID through the service manager; it was
-# destroyed after the services, and core timing runs again during their teardown
-# (SyncPause(false)), so a game with cheats crashed on the HostTiming thread when stopped.
-# Its destructor unschedules the event and waits for a callback in progress.
-set(old_cheat_shutdown "        kernel.CloseServices();")
-string(FIND "${system_source}" "${old_cheat_shutdown}" cheat_shutdown_offset)
-if(cheat_shutdown_offset LESS 0)
-    message(FATAL_ERROR "Pinned service shutdown changed; review cheat engine lifetime.")
-endif()
-string(REPLACE "${old_cheat_shutdown}"
-    "        cheat_engine.reset();\n${old_cheat_shutdown}" system_source "${system_source}")
 # Kernel intrusive lists refer into DeviceMemory even during failed Load unwind.
 # Declare the backing first so reverse member destruction releases it last.
 string(REPLACE "    std::optional<Core::DeviceMemory> device_memory;\n" "" system_source "${system_source}")
@@ -1461,19 +1435,21 @@ if(PS5_NATIVE)
     # has one, and the last registration wins: a cheat file without a build ID in its name
     # (mods/<title ID>/cheat_<name>.txt) matches every module, so its cheats were applied
     # against the last module loaded (sdk) and changed nothing in the game.
-    set(old_nso_cheats [=[        if (!cheats.empty()) {
-            system.RegisterCheatList(cheats, nso_header.build_id, load_base, image_size);]=])
+    set(old_nso_cheats [=[        if (!cheat_list.cheats.empty()) {
+            system.RegisterCheatList(process, std::move(cheat_list), nso_header.build_id, load_base,
+                                     image_size);]=])
     set(new_nso_cheats [=[        if (name == "main") {
             // The build ID a cheat file for this version of the game is named after.
             char build[17]{};
             for (int i = 0; i < 8; ++i)
                 std::snprintf(build + i * 2, 3, "%02X", static_cast<unsigned>(nso_header.build_id[i]));
             std::fprintf(stderr, "[ProsperoEden] cheats: %zu entries for main (build ID %s) at %#llx (%llu bytes)\n",
-                         cheats.size(), build, static_cast<unsigned long long>(load_base),
+                         cheat_list.cheats.size(), build, static_cast<unsigned long long>(load_base),
                          static_cast<unsigned long long>(image_size));
         }
-        if (name == "main" && !cheats.empty()) {
-            system.RegisterCheatList(cheats, nso_header.build_id, load_base, image_size);]=])
+        if (name == "main" && !cheat_list.cheats.empty()) {
+            system.RegisterCheatList(process, std::move(cheat_list), nso_header.build_id, load_base,
+                                     image_size);]=])
     string(FIND "${nso_source}" "${old_nso_cheats}" nso_cheats_offset)
     if(nso_cheats_offset LESS 0)
         message(FATAL_ERROR "Pinned NSO cheat registration changed")
@@ -1603,16 +1579,18 @@ eden_patch(patch_source
     "    std::vector<VirtualDir> patch_dirs = load_dir->GetSubdirectories();\n    if (std::find(disabled.cbegin(), disabled.cend(), \"SDMC\") == disabled.cend()) {"
     "    std::vector<VirtualDir> patch_dirs;\n    if (load_dir != nullptr) patch_dirs = load_dir->GetSubdirectories();\n    if (sdmc_load_dir != nullptr && std::find(disabled.cbegin(), disabled.cend(), \"SDMC\") == disabled.cend()) {")
 eden_patch(patch_source
-    "const auto this_build_id = fmt::format(\"{:0<64}\", name.substr(0, name.find('.')));"
-    "const auto this_build_id = fmt::format(\"{:0<64}\", Common::ToUpper(name.substr(0, name.find('.'))));")
+    "const auto this_build_id = std::format(\"{:0<64}\", name.substr(0, name.find('.')));"
+    "const auto this_build_id = std::format(\"{:0<64}\", Common::ToUpper(name.substr(0, name.find('.'))));")
 # A game without a mods folder is the usual case here, not an error to log for each of its modules.
 eden_patch(patch_source "        LOG_ERROR(Loader, \"Cannot load mods for invalid title_id={:016X}\", title_id);\n" "")
 # Cheats chosen one by one (headless/cheats.h): each mod's cheat list, from its folder or from a
 # loose cheat file, goes into the game's with the cheats that were not chosen switched off.
-eden_patch(patch_source "std::copy(res->begin(), res->end(), std::back_inserter(out));"
+eden_patch(patch_source "out.Append(std::move(*res));"
     "Eden::Cheats::Append(out, *res, subdir->GetName());")
-eden_patch(patch_source "std::copy(res.begin(), res.end(), std::back_inserter(out));"
-    "Eden::Cheats::Append(out, res, name);")
+eden_patch(patch_source "out.Append(std::move(*lower_res));"
+    "Eden::Cheats::Append(out, *lower_res, subdir->GetName());")
+eden_patch(patch_source "out.Append(parser.Parse(std::string_view(reinterpret_cast<const char*>(data.data()), data.size())));"
+    "Eden::Cheats::Append(out, parser.Parse(std::string_view(reinterpret_cast<const char*>(data.data()), data.size())), name);")
 string(PREPEND patch_source "#include \"${EDEN_PORT_DIR}/cheats.h\"\n")
 write_derived("${PORT_BUILD_DIR}/patch_manager.cpp" "${patch_source}")
 get_target_property(core_sources core SOURCES)
@@ -1682,7 +1660,7 @@ list(REMOVE_ITEM hid_sources resource_manager.cpp)
 list(APPEND hid_sources "${PORT_BUILD_DIR}/resource_manager.cpp")
 set_property(TARGET hid_core PROPERTY SOURCES "${hid_sources}")
 
-# Clang 18 trips over libstdc++ range constraints for implicit vector-to-span
+# Clang 21 trips over libstdc++ range constraints for implicit vector-to-span
 # conversions inside these generic lambdas. Use the equivalent pointer/count
 # constructor for every variable-argument wrapper.
 set(ioctl_header "core/hle/service/nvdrv/devices/ioctl_serialization.h")
@@ -2903,8 +2881,8 @@ ${paths_source}")
     # A game's mods folder is the player's (headless/mods.h): found whatever the case of its name,
     # and never created here (Eden makes one for every game that starts).
     eden_patch(bis_source
-        "    return GetOrCreateDirectoryRelative(load_root, fmt::format(\"/{:016X}\", title_id));\n}\n\nVirtualDir BISFactory::GetModificationDumpRoot"
-        "    const auto wanted = fmt::format(\"{:016X}\", title_id);\n    VirtualDir shared;\n    if (load_root != nullptr)\n        for (const auto& folder : load_root->GetSubdirectories())\n            if (Common::ToUpper(folder->GetName()) == wanted) shared = folder;\n    // With the game's own folder's mods and the cheats/ folders' cheats (game_folder_vfs.h).\n    return Eden::GameFolderMods::Root(std::move(shared), title_id, wanted);\n}\n\nVirtualDir BISFactory::GetModificationDumpRoot")
+        "    return GetOrCreateDirectoryRelative(load_root, std::format(\"/{:016X}\", title_id));\n}\n\nVirtualDir BISFactory::GetModificationDumpRoot"
+        "    const auto wanted = std::format(\"{:016X}\", title_id);\n    VirtualDir shared;\n    if (load_root != nullptr)\n        for (const auto& folder : load_root->GetSubdirectories())\n            if (Common::ToUpper(folder->GetName()) == wanted) shared = folder;\n    // With the game's own folder's mods and the cheats/ folders' cheats (game_folder_vfs.h).\n    return Eden::GameFolderMods::Root(std::move(shared), title_id, wanted);\n}\n\nVirtualDir BISFactory::GetModificationDumpRoot")
     string(PREPEND bis_source "#include \"common/string_util.h\"\n#include \"${EDEN_PORT_DIR}/game_folder_vfs.h\"\n")
     write_derived("${PORT_BUILD_DIR}/bis_factory.cpp" "${bis_source}")
     list(REMOVE_ITEM core_sources file_sys/bis_factory.cpp)
@@ -3335,7 +3313,7 @@ endif()
             if(NOT EXISTS "${update_libraries}/libcurl.a" OR NOT EXISTS "${update_libraries}/libpsl.a")
                 message(FATAL_ERROR "libcurl is missing from the PacBrew prefix (${update_libraries}): run make deps")
             endif()
-            find_program(UPDATE_CHECK_LINKER NAMES ld.lld-18 ld.lld REQUIRED)
+            find_program(UPDATE_CHECK_LINKER NAMES ld.lld-21 ld.lld REQUIRED)
             find_program(UPDATE_CHECK_OBJCOPY NAMES llvm-objcopy-18 llvm-objcopy REQUIRED)
             add_library(update-check OBJECT
                 "${EDEN_PORT_DIR}/update_check/update_check.c"

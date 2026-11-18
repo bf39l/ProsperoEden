@@ -22,9 +22,9 @@
             // Count additional batched blocks.
             const auto arch_descriptor = A64::LocationDescriptor{descriptor};
             ir_block.Reset(arch_descriptor);
-            A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+            A64::Translate(ir_block, arch_descriptor, conf);
             Optimization::Optimize(ir_block, conf, polyfill_options);
-            const auto entrypoint = emitter.Emit(ir_block, false).entrypoint;
+            const auto entrypoint = emitter.Emit(ir_block).entrypoint;
             if (!first) first = entrypoint;
             ++batch;
             if (arch_descriptor.SingleStepping() || block_of_code.hasWritableAlias()) break;

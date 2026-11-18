@@ -210,7 +210,7 @@ def build(work, name, flags):
     source.write_text(PROGRAM)
     binary = work / name
     # The app's linker script names the code's bounds; the host's linker takes it as an input.
-    subprocess.run(['clang++-18', '-std=c++20', '-O2', '-g', '-pthread', '-Wall', '-Wextra', '-Werror',
+    subprocess.run(['clang++-21', '-std=c++20', '-O2', '-g', '-pthread', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-fno-rtti', '-fuse-ld=lld', *flags, '-I', str(root / 'headless'),
                     str(source), str(root / 'headless/crash_report.cpp'), str(root / 'tools/unwind.ld'),
                     '-o', str(binary)], check=True)
@@ -222,7 +222,7 @@ def functions(binary):
     text_start, _offset, _size = \
         runpy.run_path(str(root / 'tools/symbolize-crash.py'))['sections'](binary.read_bytes())['.text']
     found = {}
-    listing = subprocess.run(['llvm-nm-18', '-S', '--defined-only', str(binary)], capture_output=True, text=True,
+    listing = subprocess.run(['llvm-nm-21', '-S', '--defined-only', str(binary)], capture_output=True, text=True,
                              check=True).stdout
     for line in listing.splitlines():
         parts = line.split()

@@ -2,7 +2,7 @@
 
 Build ProsperoEden for PlayStation 5 on an Apple Silicon Mac using an Ubuntu AMD64 Docker container.
 
-This guide is based on the **`v1.000.111-fork`** branch, derived from the official upstream `v1.000.111` prerelease.
+This guide is based on the **`v26.011.018`** branch, which tracks Eden's current master (`d85bad89`).
 
 The fork preserves the upstream prerelease UI and emulator implementation while adding per-game directory scanning, including support for games with updates and DLC stored in individual folders.
 
@@ -12,7 +12,7 @@ The fork preserves the upstream prerelease UI and emulator implementation while 
 - Docker Desktop with AMD64 emulation enabled (Rosetta where available)
 - Git
 - Sufficient disk space for SDK dependencies, FFmpeg, emulator source, and build artifacts
-- Repository checked out to `v1.000.111-fork`
+- Repository checked out to `v26.011.018`
 
 Repository: https://github.com/bf39l/ProsperoEden
 
@@ -25,7 +25,7 @@ git clone https://github.com/bf39l/ProsperoEden.git
 
 cd ProsperoEden
 
-git switch v1.000.111-fork
+git switch v26.011.018
 ```
 
 Verify the branch:
@@ -37,7 +37,7 @@ git branch --show-current
 Expected:
 
 ```text
-v1.000.111-fork
+v26.011.018
 ```
 
 For a completely fresh build, use a fresh clone rather than a working directory containing build artifacts from other branches.
@@ -88,6 +88,8 @@ apt-get install -y --no-install-recommends \
 
 These packages address dependency extraction, FFmpeg assembly, and compiler-cache requirements encountered during the build.
 
+The compiler is **LLVM 21** (`clang-21`), which `tools/ci/ubuntu-packages.txt` installs. Eden now needs Clang 19 or later (its `jacinth`/`hydrocarbon` C++20 modules), so an older clang is not enough.
+
 ## 4. Apply the tar compatibility workaround
 
 GNU tar may fail under Docker AMD64 emulation on Apple Silicon with errors such as:
@@ -130,7 +132,7 @@ make deps
 
 `make toolchain` prepares or verifies the host toolchain.
 
-`make deps` fetches the dependencies required by ProsperoEden, including the Mihawk Vulkan and SDK source repositories.
+`make deps` fetches the dependencies required by ProsperoEden, including the Mihawk Vulkan and SDK source repositories. Downloads and git snapshots are cached in the git-ignored `vendor/` folder (`vendor/git/*.bundle`, tracked source only), so a later `make deps` works offline and survives an upstream repository disappearing. `make clean` and `make distclean` leave `vendor/` alone (the latter backs it up to `.vendor-backup/` first); only `make clean-vendor` removes it.
 
 The dependency process may prepare:
 
@@ -239,6 +241,10 @@ Limits build parallelism to four jobs. This can reduce memory pressure when runn
 
 Skips host-side source checks that failed under AMD64 emulation, particularly the JIT allocator execution checks.
 
+**`EDEN_SELF_UPDATE` (default `OFF`)**
+
+The self-update helper (`self-updater.elf`) is not built or shipped by default, because it needs a hosted signed catalog (`homebrew.page`). Set `EDEN_SELF_UPDATE=ON` to build and ship it.
+
 The build still performs its normal compilation, linking, and applicable package validation steps.
 
 However, skipping these checks means the result has not passed the complete upstream validation procedure.
@@ -273,12 +279,12 @@ After a successful release build, the expected output structure is:
 
 ```text
 dist/
-├── ProsperoEden-v1.000.111-fork.zip
+├── ProsperoEden-v26.011.018.zip
 └── SHA256SUMS
 
 build/
 └── release/
-    └── PPSA99016/
+    └── PPSA99018/
         ├── eboot.bin
         ├── core-homebrew.nro
         ├── lapy.elf
@@ -290,7 +296,7 @@ build/
 
 Additional files and directories may be present depending on the build configuration.
 
-The release ZIP contains the `PPSA99016` application folder.
+The release ZIP contains the `PPSA99018` application folder.
 
 ## 9. Verify the release
 
@@ -305,14 +311,14 @@ sha256sum -c dist/SHA256SUMS
 Expected:
 
 ```text
-ProsperoEden-v1.000.111-fork.zip: OK
+ProsperoEden-v26.011.018.zip: OK
 ```
 
 Verify ZIP integrity:
 
 ```bash
 unzip -t \
-  dist/ProsperoEden-v1.000.111-fork.zip | tail -1
+  dist/ProsperoEden-v26.011.018.zip | tail -1
 ```
 
 Expected:
@@ -328,15 +334,15 @@ python3 - <<'PY'
 import json
 from zipfile import ZipFile
 
-archive = "dist/ProsperoEden-v1.000.111-fork.zip"
+archive = "dist/ProsperoEden-v26.011.018.zip"
 
 with ZipFile(archive) as z:
     data = json.loads(
-        z.read("PPSA99016/sce_sys/param.json")
+        z.read("PPSA99018/sce_sys/param.json")
     )
 
-assert data["titleId"] == "PPSA99016"
-assert data["contentVersion"] == "01.000.111"
+assert data["titleId"] == "PPSA99018"
+assert data["contentVersion"] == "26.011.018"
 assert (
     data["localizedParameters"]["en-US"]["titleName"]
     == "ProsperoEden Fork"
@@ -350,8 +356,8 @@ Check the executable in the ZIP:
 
 ```bash
 unzip -l \
-  dist/ProsperoEden-v1.000.111-fork.zip \
-  | grep 'PPSA99016/eboot.bin'
+  dist/ProsperoEden-v26.011.018.zip \
+  | grep 'PPSA99018/eboot.bin'
 ```
 
 These tests verify the generated artifact and application metadata. They do not prove that the emulator runs correctly on PS5 hardware.
@@ -363,13 +369,13 @@ Extract the release archive.
 The application folder inside the ZIP is:
 
 ```text
-PPSA99016/
+PPSA99018/
 ```
 
 For a homebrew folder installation, the expected destination is:
 
 ```text
-/data/homebrew/PPSA99016/
+/data/homebrew/PPSA99018/
 ```
 
 Copy the application files to the PS5 using your existing homebrew file-transfer setup.
@@ -378,9 +384,7 @@ Ensure ProsperoEden is closed before replacing files.
 
 Depending on your ShadowMount+ setup, a rescan or PS5 restart may be required for application registration.
 
-**Important:** The fork uses the same title ID as the official `v1.000.111` prerelease. Installing it may replace that prerelease's registration rather than create a separate PS5 Home screen entry.
-
-The original `PPSA99008` installation uses a different title ID.
+**Important:** This build uses its own title ID (`PPSA99018`) so it installs beside, rather than over, other ProsperoEden builds.
 
 ## 11. Reuse the Docker container
 
@@ -399,6 +403,8 @@ EDEN_SKIP_SOURCE_CHECKS=1 make JOBS=4
 ```
 
 The Docker volume retains `/root/.cache`, while the stopped container retains other files created inside it.
+
+The vendored dependency cache (`vendor/`, git-ignored) lives in the repository checkout, not in the container, so it persists across containers. `make distclean` backs it up to `.vendor-backup/` before cleaning; `make clean-vendor` removes both.
 
 ### Start a shell in an already running container
 
@@ -573,18 +579,18 @@ Test on PS5 hardware before treating the build as stable.
 | Property | Value |
 |---|---|
 | Repository | `bf39l/ProsperoEden` |
-| Branch | `v1.000.111-fork` |
-| Upstream release | `v1.000.111` |
-| PS5 title ID | `PPSA99016` |
-| Content version | `01.000.111` |
+| Branch | `v26.011.018` |
+| Upstream | Eden master (`d85bad89`) |
+| PS5 title ID | `PPSA99018` |
+| Content version | `26.011.018` |
 | Display name | `ProsperoEden Fork` |
-| Release archive | `ProsperoEden-v1.000.111-fork.zip` |
+| Release archive | `ProsperoEden-v26.011.018.zip` |
 | Docker platform | `linux/amd64` |
 | Docker base image | `ubuntu:26.04` |
 
 ### Fork-specific changes
 
-- Retains the upstream `v1.000.111` UI and emulator code as the base
+- Tracks Eden's current master (`d85bad89`) as the emulator base
 - Backports per-game folder scanning
 - Supports discovering base NSP/XCI files one folder level below the ROM directory
 - Includes update/DLC handling associated with the folder-scanning backport

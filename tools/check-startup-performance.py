@@ -104,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix='eden-startup-') as directory:
     directory = Path(directory)
     (directory / 'check.cpp').write_text(code)
     executable = directory / 'check'
-    subprocess.run(['clang++-18', '-std=c++20', '-O2', '-pthread', '-DARCHITECTURE_x86_64',
+    subprocess.run(['clang++-21', '-std=c++20', '-O2', '-pthread', '-DARCHITECTURE_x86_64',
                     '-I', str(root / 'headless'), '-I', str(root / 'src'), '-I', str(source),
                     '-I', str(root / '.deps/fmt-12.1.0/include'),
                     str(directory / 'check.cpp'), str(root / 'headless/performance.cpp'),

@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix='eden-stop-') as work:
     work = pathlib.Path(work)
     (work / 'check.cpp').write_text(TEST)
     binary = work / 'check'
-    subprocess.run(['clang++-18', '-std=c++20', '-O1', '-g', '-pthread', '-fsanitize=thread', '-I', str(root / 'headless'),
+    subprocess.run(['clang++-21', '-std=c++20', '-O1', '-g', '-pthread', '-fsanitize=thread', '-I', str(root / 'headless'),
                     str(work / 'check.cpp'), str(root / 'headless/stop_limit.cpp'), '-o', str(binary)], check=True)
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=120)
     if result.returncode != 0 or 'ok' not in result.stdout:

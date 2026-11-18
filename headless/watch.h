@@ -7,6 +7,7 @@
 // once the game is loaded. watch_snapshot=OFFSET:VALUE (hex) logs every guest thread once, at
 // the first watched write of VALUE at OFFSET.
 #include <atomic>
+#include <format>
 #include <string>
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -61,7 +62,7 @@ void Report(u64 vaddr, unsigned size, u64 value, Memory& memory, const Jit& jit,
     std::string chain;
     u64 fp = jit.GetRegister(29);
     for (int i = 0; i < 8 && fp && memory.IsValidVirtualAddressRange(fp, 16); ++i) {
-        chain += fmt::format(" {:X}", memory.Read64(fp + 8));
+        chain += std::format(" {:X}", memory.Read64(fp + 8));
         fp = memory.Read64(fp);
     }
     LOG_CRITICAL(Core_ARM, "EDEN_WATCH_WRITE core={} thread={} name={} pc={:016X} lr={:016X} offset={:#x} size={} value={:016X} chain={}",

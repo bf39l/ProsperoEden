@@ -377,7 +377,7 @@ with tempfile.TemporaryDirectory(prefix='eden-heap-') as work:
     for flags, label in ((['-O1', '-g', '-fsanitize=undefined', '-fno-sanitize-recover=all'], 'checked'),
                          (['-O2', '-fsanitize=thread'], 'thread sanitizer')):
         binary = work / ('heap-' + label.split()[0])
-        subprocess.run(['clang-18', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Wno-unused-function',
+        subprocess.run(['clang-21', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Wno-unused-function',
                         '-Wno-unused-parameter', *flags, str(source), '-o', str(binary)], check=True)
         for mode in ((), ('whole',)):
             if label != 'checked' and mode:

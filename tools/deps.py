@@ -5,12 +5,15 @@
   tools/deps.py status          list every input, where it lives and whether it matches its pin
   tools/deps.py fetch [NAME...] fetch what is missing (all inputs, or the named ones)
   tools/deps.py path NAME       print where an input lives
-  tools/deps.py clean           remove the fetched inputs inside .deps (sibling checkouts stay)
+  tools/deps.py clean           back the vendor cache up, then remove the inputs inside .deps
+  tools/deps.py clean-vendor    remove the vendor cache and its backup (the only irreversible clean)
 
 Nothing that already exists is modified: an existing checkout stays at whatever revision it
-has (status reports it), an existing file or folder is not downloaded again. Downloads are
-cached in $PROSPEROEDEN_DEPS_CACHE (default ~/.cache/prosperoeden-deps) and verified against
-their pinned SHA-256/SHA-512 before use; git inputs are fetched at their pinned commit.
+has (status reports it), an existing file or folder is not downloaded again. Downloads and git
+snapshots are cached in the vendored folder (default ./vendor, or $PROSPEROEDEN_DEPS_CACHE) and
+verified against their pinned SHA-256/SHA-512 before use; git inputs are fetched at their pinned
+commit. `clean` copies the vendor cache to .vendor-backup first, so a clean never loses a working
+set and the build stays reproducible if an upstream repository disappears.
 """
 import hashlib
 import json
@@ -27,9 +30,8 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = json.loads((ROOT / 'tools/deps.json').read_text())
-CACHE = pathlib.Path(os.environ.get('PROSPEROEDEN_DEPS_CACHE') or
-                     pathlib.Path(os.environ.get('XDG_CACHE_HOME') or pathlib.Path.home() / '.cache')
-                     / 'prosperoeden-deps')
+CACHE = pathlib.Path(os.environ.get('PROSPEROEDEN_DEPS_CACHE') or ROOT / 'vendor')
+VENDOR_BACKUP = ROOT / '.vendor-backup'
 
 
 def fail(message):
@@ -157,7 +159,13 @@ def git(*args, cwd=None):
 
 def fetch_git(item):
     path = location(item)
+    snapshot = CACHE / 'git' / f'{item["name"]}.bundle'
     if not path.exists():
+        if snapshot.exists():
+            print(f'deps: restoring {item["name"]} from {os.path.relpath(snapshot, ROOT)}', flush=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            git('clone', '-q', str(snapshot), str(path))
+            return
         print(f'deps: fetching {item["url"]} at {item["commit"][:12]} into {path}', flush=True)
         staging = path.with_name(path.name + f'.partial-{os.getpid()}')
         shutil.rmtree(staging, ignore_errors=True)
@@ -172,6 +180,11 @@ def fetch_git(item):
     if 'setup' in item and not (path / item['setup_creates']).exists():
         print(f'deps: setting up {item["name"]}: {" ".join(item["setup"])}', flush=True)
         subprocess.run(item['setup'], cwd=path, check=True)
+    # Snapshot the tracked source (and history) into the vendor, without the build artifacts a
+    # later prepare step writes beside it: a clean or an upstream deletion cannot lose it.
+    if not snapshot.exists():
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        git('bundle', 'create', str(snapshot), 'HEAD', cwd=path)
 
 
 def fetch(item):
@@ -242,8 +255,20 @@ def status():
         print(f'\n{mismatched} checkout(s) differ from their pin; the build uses them as they are.')
 
 
+def backup_vendor():
+    """Copy the vendor cache to .vendor-backup, so a clean never loses a working set."""
+    if not CACHE.exists():
+        return
+    if VENDOR_BACKUP.exists():
+        shutil.rmtree(VENDOR_BACKUP)
+    shutil.copytree(CACHE, VENDOR_BACKUP)
+    print(f'deps: backed up vendor to {os.path.relpath(VENDOR_BACKUP, ROOT)}')
+
+
 def clean():
-    """Removes the fetched inputs inside this repository's .deps; sibling checkouts stay."""
+    """Back up the vendor cache, then remove the fetched inputs inside .deps; sibling checkouts
+    and the vendor cache itself stay."""
+    backup_vendor()
     deps = (ROOT / '.deps').resolve()
     for item in MANIFEST['items']:
         targets = []
@@ -269,6 +294,14 @@ def clean():
                 target.unlink()
 
 
+def clean_vendor():
+    """Removes the vendored cache and its backup: the only clean that cannot be undone offline."""
+    for path in (CACHE, VENDOR_BACKUP):
+        if path.exists():
+            print(f'deps: removing {os.path.relpath(path, ROOT)}')
+            shutil.rmtree(path)
+
+
 def main(argv):
     if not argv or argv[0] in ('-h', '--help'):
         print(__doc__.strip())
@@ -278,6 +311,8 @@ def main(argv):
         status()
     elif command == 'clean':
         clean()
+    elif command == 'clean-vendor':
+        clean_vendor()
     elif command == 'fetch':
         for item in items(names):
             fetch(item)
@@ -286,7 +321,7 @@ def main(argv):
             fail('usage: tools/deps.py path NAME')
         print(location(items(names)[0]))
     else:
-        fail(f'unknown command {command} (status, fetch, path)')
+        fail(f'unknown command {command} (status, fetch, path, clean, clean-vendor)')
 
 
 if __name__ == '__main__':

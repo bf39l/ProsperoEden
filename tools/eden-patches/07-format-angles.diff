@@ -1,0 +1,53 @@
+--- a/src/dynarmic/src/dynarmic/ir/basic_block.cpp
++++ b/src/dynarmic/src/dynarmic/ir/basic_block.cpp
+@@ -130,7 +130,7 @@
+     case Type::Cond: return std::format("$cond={}", A32::CondToString(arg.GetCond()));
+     case Type::Table: return std::format("$table");
+     case Type::AccType: return std::format("$acc-type={}", u32(arg.GetAccType()));
+-    default: return std::format("<unknown immediate type {}>", arg.GetType());
++    default: return std::format("[unknown immediate type {}]", arg.GetType());
+     }
+ };
+ 
+@@ -168,7 +168,7 @@
+             Type actual_type = arg.GetType();
+             Type expected_type = GetArgTypeOf(op, arg_index);
+             if (!AreTypesCompatible(actual_type, expected_type)) {
+-                ret += std::format("<type error: {} != {}>", GetNameOf(actual_type), GetNameOf(expected_type));
++                ret += std::format("[type error: {} != {}]", GetNameOf(actual_type), GetNameOf(expected_type));
+             }
+         }
+ 
+--- a/src/shader_recompiler/frontend/ir/flow_test.h
++++ b/src/shader_recompiler/frontend/ir/flow_test.h
+@@ -59,7 +59,7 @@
+     SRIR_FLOW_TEST_LIST
+ #undef SRIR_FLOW_TEST_ELEM
+     default:
+-        return std::format("<invalid flow test {}>", int(flow_test));
++        return std::format("[invalid flow test {}]", int(flow_test));
+     }
+ }
+ 
+--- a/src/shader_recompiler/frontend/ir/attribute.h
++++ b/src/shader_recompiler/frontend/ir/attribute.h
+@@ -266,7 +266,7 @@
+     SRIR_ATTRIBUTE_LIST
+ #undef SRIR_ATTRIBUTE_ELEM
+     default:
+-        return std::format("<reserved attribute {}>", int(attribute));
++        return std::format("[reserved attribute {}]", int(attribute));
+     }
+ }
+ 
+--- a/src/shader_recompiler/frontend/ir/basic_block.cpp
++++ b/src/shader_recompiler/frontend/ir/basic_block.cpp
+@@ -139,7 +139,7 @@
+                 const Type actual_type{arg.Type()};
+                 const Type expected_type{ArgTypeOf(op, arg_index)};
+                 if (!AreTypesCompatible(actual_type, expected_type)) {
+-                    ret += std::format("<type error: {} != {}>", actual_type, expected_type);
++                    ret += std::format("[type error: {} != {}]", actual_type, expected_type);
+                 }
+             }
+         }

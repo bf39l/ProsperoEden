@@ -20,6 +20,6 @@ if "$link"; then
         -Wl,-e,main -Wl,--no-undefined -L "$sdk/target/lib"
         -lSceLibcInternal -lkernel -lc -lSceNet)
 fi
-exec clang-18 --target=x86_64-sie-ps5 -isysroot "$sdk" -isystem "$sdk/target/include" \
+exec clang-21 --target=x86_64-sie-ps5 -isysroot "$sdk" -isystem "$sdk/target/include" \
     -fvisibility-nodllstorageclass=default -fno-stack-protector -fno-plt -femulated-tls \
     -ffunction-sections -fdata-sections "${arguments[@]}"

@@ -77,12 +77,12 @@ int main() {
 }
 ''')
     binary = folder / 'check'
-    subprocess.run(['clang++-18', '-std=c++20', '-I', str(folder),
+    subprocess.run(['clang++-21', '-std=c++20', '-I', str(folder),
                     str(folder / 'check.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
     if len(sys.argv) == 3:
         (headers / 'slab_helpers.h').write_text(Path(sys.argv[2]).read_text())
-        subprocess.run(['clang++-18', '-std=c++20', '-I', str(folder),
+        subprocess.run(['clang++-21', '-std=c++20', '-I', str(folder),
                         str(folder / 'check.cpp'), '-o', str(binary)], check=True)
         old = subprocess.run([str(binary)], capture_output=True, text=True)
         assert old.returncode == -6 and 'state.post == initialized' in old.stderr, old

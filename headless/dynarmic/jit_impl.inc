@@ -292,12 +292,12 @@ private:
             // LocationDescriptor ctor() does important ops (like tflags) do not skip
             auto const arch_descriptor = A64::LocationDescriptor{descriptor};
             ir_block.Reset(arch_descriptor);
-            A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+            A64::Translate(ir_block, arch_descriptor, conf);
             const u64 translated = EdenClockNs();
             Optimization::Optimize(ir_block, conf, polyfill_options);
             const u64 optimized = EdenClockNs();
             emitter.eden_pending_sites.clear();
-            const auto emitted = emitter.Emit(ir_block, false);
+            const auto emitted = emitter.Emit(ir_block);
             eden_state.store(previous, std::memory_order_seq_cst);
             EdenReportCompile(descriptor, start, translated, optimized);
             eden_space.store(block_of_code.SpaceRemaining(), std::memory_order_relaxed);
@@ -345,10 +345,10 @@ private:
         const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+        A64::Translate(ir_block, arch_descriptor, conf);
         Optimization::Optimize(ir_block, conf, polyfill_options);
         emitter.eden_pending_sites.clear();
-        const auto emitted = emitter.Emit(ir_block, false);
+        const auto emitted = emitter.Emit(ir_block);
         eden_pre_state.store(EdenOutside, std::memory_order_seq_cst);
         eden_space.store(block_of_code.SpaceRemaining(), std::memory_order_relaxed);
 

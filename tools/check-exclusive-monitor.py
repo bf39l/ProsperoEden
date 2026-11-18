@@ -58,11 +58,11 @@ with tempfile.TemporaryDirectory(prefix='eden-monitor-') as tmp:
     cpp = Path(tmp) / 'check.cpp'
     binary = Path(tmp) / 'check'
     cpp.write_text(source)
-    subprocess.run(['clang++-18', '-std=c++20', '-O3', '-flto=thin', '-fuse-ld=lld-18', '-pthread', '-Wall', '-Wextra',
+    subprocess.run(['clang++-21', '-std=c++20', '-O3', '-flto=thin', '-fuse-ld=lld-21', '-pthread', '-Wall', '-Wextra',
                     '-Werror', *includes, str(cpp), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=20)
 native = cache / 'native-local/bin/eden-headless'
-symbols = subprocess.check_output(['llvm-nm-18', '--defined-only', str(native)], text=True)
+symbols = subprocess.check_output(['llvm-nm-21', '--defined-only', str(native)], text=True)
 outlined = '_ZN8Dynarmic8SpinLock4LockEv' in symbols
 names = ('_ZN8Dynarmic8SpinLock4LockEv,_ZN8Dynarmic8SpinLock6UnlockEv' if outlined
          else '_ZN8Dynarmic16ExclusiveMonitor14ClearProcessorEm')

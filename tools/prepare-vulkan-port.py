@@ -132,6 +132,15 @@ void RasterizerVulkan::DispatchCompute() {"""),
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
+    attribute_handle_pipeline = nullptr;
+    attribute_handle_runs.clear();
+    if (split_attribute_handles && pipeline->UsesAttributeHandle()) {
+        CollectAttributeHandleRuns(is_indexed);
+        if (!attribute_handle_runs.empty()) {
+            attribute_handle_pipeline = pipeline;
+            pipeline->SetAttributeHandle(attribute_handle_runs.front().handle);
+        }
+    }
     if (!pipeline->Configure(is_indexed))
         return;
 
@@ -158,6 +167,15 @@ void RasterizerVulkan::DispatchCompute() {"""),
     // Waiting for both cache mutexes. SetEngine between them and here is two pointer assignments,
     // and the hold itself carries on through what follows: the phases below measure it.
     ::Eden::Performance::Mark(::Eden::Performance::draw_lock_wait, phase);
+    attribute_handle_pipeline = nullptr;
+    attribute_handle_runs.clear();
+    if (split_attribute_handles && pipeline->UsesAttributeHandle()) {
+        CollectAttributeHandleRuns(is_indexed);
+        if (!attribute_handle_runs.empty()) {
+            attribute_handle_pipeline = pipeline;
+            pipeline->SetAttributeHandle(attribute_handle_runs.front().handle);
+        }
+    }
     if (!pipeline->Configure(is_indexed))
         return;
     ::Eden::Performance::Mark(::Eden::Performance::draw_config, phase);
@@ -884,8 +902,8 @@ adapt('src/video_core/renderer_vulkan/present/window_adapt_pass.h',
     # their picture's memory comes from (vulkan_hud_prepare.inc).
     ('class RasterizerVulkan;\n\nclass WindowAdaptPass final {',
      'class RasterizerVulkan;\nclass MemoryAllocator;\n\nclass WindowAdaptPass final {'),
-    ('const Layout::FramebufferLayout& layout, Frame* dst);',
-     'const Layout::FramebufferLayout& layout, Frame* dst, MemoryAllocator* hud_memory = nullptr);'),
+    ('const Layout::FramebufferLayout& layout, Frame* dst, bool overlay_panels = false);',
+     'const Layout::FramebufferLayout& layout, Frame* dst, bool overlay_panels = false,\n              MemoryAllocator* hud_memory = nullptr);'),
     ('    vk::Pipeline coverage_pipeline;',
      '    vk::Pipeline coverage_pipeline;\n    vk::PipelineLayout hud_layout;\n    vk::Pipeline hud_pipeline;\n'
      '    vk::Image hud_art;\n    vk::ImageView hud_art_view;\n    vk::Sampler hud_sampler;\n'
@@ -896,18 +914,18 @@ adapt('src/video_core/renderer_vulkan/present/window_adapt_pass.cpp', 'vulkan_wi
     ('#include "core/frontend/framebuffer_layout.h"',
      '#include "core/frontend/framebuffer_layout.h"\n#include "hud.h"\n#include "loading_art.h"\n'
      '#include "vulkan_hud_shaders.h"'),
-    ('const Layout::FramebufferLayout& layout, Frame* dst) {',
-     'const Layout::FramebufferLayout& layout, Frame* dst, MemoryAllocator* hud_memory) {'),
-    ('    scheduler.Record([=](vk::CommandBuffer cmdbuf) {',
-     (port / 'vulkan_hud_prepare.inc').read_text() + '\n    scheduler.Record([=](vk::CommandBuffer cmdbuf) {'),
+    ('const Layout::FramebufferLayout& layout, Frame* dst,\n                           bool overlay_panels) {',
+     'const Layout::FramebufferLayout& layout, Frame* dst,\n                           bool overlay_panels,\n                           MemoryAllocator* hud_memory) {'),
+    ('    scheduler.Record([=, this](vk::CommandBuffer cmdbuf) {',
+     (port / 'vulkan_hud_prepare.inc').read_text() + '\n    scheduler.Record([=, this](vk::CommandBuffer cmdbuf) {'),
     ('        cmdbuf.EndRenderPass();',
      (port / 'vulkan_hud_draw.inc').read_text() + '\n        cmdbuf.EndRenderPass();'),
 ])
 adapt('src/video_core/renderer_vulkan/vk_blit_screen.cpp', 'vulkan_blit_screen.cpp', [
     ('VkFormat current_swapchain_view_format) {',
      'VkFormat current_swapchain_view_format, bool draw_hud) {'),
-    ('image_index, layers, framebuffers, layout, frame);',
-     'image_index, layers, framebuffers, layout, frame, draw_hud ? &memory_allocator : nullptr);'),
+    ('image_index, layers, framebuffers, layout, frame,\n                       overlay_panels);',
+     'image_index, layers, framebuffers, layout, frame,\n                       overlay_panels, draw_hud ? &memory_allocator : nullptr);'),
 ])
 shader_header = '#pragma once\n#include <cstdint>\n'
 for stage in ('vert', 'frag'):
@@ -1690,7 +1708,7 @@ probes = {
 }
 for name, index, expected in (
     ('vk_fence_manager', 6, 1), ('vk_buffer_cache', 7, 3),
-    ('vk_texture_cache', 8, 1), ('vk_swapchain', 9, 6),
+    ('vk_texture_cache', 8, 2), ('vk_swapchain', 9, 6),
     ('vk_descriptor_buffer', 10, 2), ('vk_multi_range_buffer', 11, 1),
     ('vk_compute_pass', 12, 1),
 ):

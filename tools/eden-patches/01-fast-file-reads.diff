@@ -1,24 +1,24 @@
 --- a/src/common/fs/file.h
 +++ b/src/common/fs/file.h
-@@ -289,6 +289,14 @@
+@@ -274,6 +274,14 @@
+         }
+         return IsOpen() ? std::fread(data.data(), sizeof(T), data.size(), file) : 0;
      }
- 
-     /**
++
++    /**
 +     * Reads length bytes at offset without the stdio buffer (which splits a read into
 +     * buffer-sized system calls) and without moving the file pointer.
 +     *
 +     * @returns Count of bytes successfully read.
 +     */
 +    [[nodiscard]] size_t ReadAt(void* data, size_t length, s64 offset) const;
-+
-+    /**
-      * Writes a span of T data to a file sequentially.
-      * This function writes from the current position of the file pointer and
-      * advances it by the (count of T * sizeof(T)) bytes successfully written.
+ 
+     /**
+     * Writes a span of T data to a file sequentially.
 --- a/src/common/fs/file.cpp
 +++ b/src/common/fs/file.cpp
-@@ -427,6 +427,33 @@
-     return file_size;
+@@ -537,6 +537,33 @@
+     return 0;
  }
  
 +size_t IOFile::ReadAt(void* data, size_t length, s64 offset) const {
@@ -49,8 +49,8 @@
 +}
 +
  bool IOFile::Seek(s64 offset, SeekOrigin origin) const {
-     if (!IsOpen()) {
-         return false;
+     if (IsMappedFile()) {
+         // fuck you to whoever made this method const
 --- a/src/core/file_sys/vfs/vfs_real.h
 +++ b/src/core/file_sys/vfs/vfs_real.h
 @@ -10,6 +10,7 @@
@@ -91,12 +91,13 @@
  #include "common/fs/file.h"
  #include "common/fs/fs.h"
  #include "common/fs/path_util.h"
-@@ -332,12 +334,60 @@
+@@ -330,13 +332,61 @@
+ bool RealVfsFile::IsReadable() const {
      return True(perms & OpenMode::Read);
  }
- 
-+using namespace Common::Literals;
 +
++using namespace Common::Literals;
+ 
 +namespace {
 +constexpr std::size_t ReadBlockSize = 1_MiB;
 +constexpr std::size_t ReadBlocksPerFile = 8;

@@ -16,10 +16,9 @@ harfbuzz=${harfbuzz%/harfbuzz.cc}
 # The UI kit's theme table: the launcher's themes start from its recipes (pe/ui/theme_kit.cpp).
 kit=$(python3 -B "$root/tools/deps.py" path ui-kit)/src
 
-# nlohmann/json (pe/ui/runtime_loading.hpp): the copy in the Eden source `make prepare` unpacks.
-json=$(ls -d "$(cat "$root/.local/headless-cache" 2>/dev/null)"/source/.cache/cpm/nlohmann_json/*/single_include \
-    2>/dev/null | head -1)
-[[ -n $json ]] || { echo "nlohmann/json not found: run make prepare first" >&2; exit 1; }
+# nlohmann/json (pe/ui/runtime_loading.hpp): the copy `make deps` fetches (tools/deps.json).
+json=$(python3 -B "$root/tools/deps.py" path nlohmann)/single_include
+[[ -n $json ]] || { echo "nlohmann/json not found: run make deps first" >&2; exit 1; }
 
 sources=("$source_dir"/host/*.cpp "$source_dir"/pe/core/*.cpp "$source_dir"/pe/gfx/*.cpp "$source_dir"/pe/ui/*.cpp
     "$kit/ui/theme.cpp")

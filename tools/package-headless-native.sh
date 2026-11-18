@@ -9,11 +9,11 @@ scratch=$(cat "$root/.local/headless-cache")
 template="$root/../ps5-native-app-boilerplate"
 builder="$root/build/host/ps5-native-tool"
 out="$root/build/headless-native"
-app="${EDEN_PACKAGE_DIR:-$root/dist/headless/PPSA99008}"
+app="${EDEN_PACKAGE_DIR:-$root/dist/headless/PPSA99018}"
 # A separate clean staging directory lets driver candidates omit private game
 # assets without deleting or copying the existing development installation.
 if [[ -n ${EDEN_PACKAGE_DIR:-} ]]; then
-    [[ $(realpath -m "$app") == "$(realpath -m "$root")"/build/*/PPSA99008 ]] || exit 2
+    [[ $(realpath -m "$app") == "$(realpath -m "$root")"/build/*/PPSA99018 ]] || exit 2
     [[ ${1:-} != --game ]] || exit 2
 fi
 test -x "$builder"
@@ -52,11 +52,14 @@ cp "$root/build/lapy-owned-helper/LICENSE.Lapy" "$app/licenses/Lapy-MIT.txt"
 # (the source pictures beside it stay in the repository).
 # The self-update helper (headless/self_update_helper, the boilerplate's) is an ordinary payload:
 # the app sends it to the console's payload loader to replace the app's files once it has closed.
-# It does file work with the rights every payload has and never touches the kernel.
-make -s -C "$root/headless/self_update_helper" PS5_PAYLOAD_SDK="$template/.deps/native/ps5-payload-sdk" \
-    OUTPUT="$root/build/self-update/self-updater.elf"
-python3 "$root/tools/validate-loader-elf.py" "$root/build/self-update/self-updater.elf"
-cp "$root/build/self-update/self-updater.elf" "$app/self-updater.elf"
+# It does file work with the rights every payload has and never touches the kernel. It is only
+# built and shipped when EDEN_SELF_UPDATE=ON (default OFF: it needs a hosted signed catalog).
+if grep -qx 'EDEN_SELF_UPDATE:BOOL=ON' "$out/CMakeCache.txt"; then
+    make -s -C "$root/headless/self_update_helper" PS5_PAYLOAD_SDK="$template/.deps/native/ps5-payload-sdk" \
+        OUTPUT="$root/build/self-update/self-updater.elf"
+    python3 "$root/tools/validate-loader-elf.py" "$root/build/self-update/self-updater.elf"
+    cp "$root/build/self-update/self-updater.elf" "$app/self-updater.elf"
+fi
 cp "$root/sce_sys/"{param.json,icon0.png,pic0.dds,pic1.dds,snd0.at9} "$app/sce_sys/"
 rm -rf "$app/ui"
 cp -a "$root/headless/prosperoeden/ui" "$app/ui"
@@ -82,8 +85,8 @@ if game:
     assert (app / 'game-assets.json').is_file()
     assert (app / 'assets/keys/prod.keys').is_file()
 value = json.loads((app / 'sce_sys/param.json').read_text())
-assert (value['titleId'], value['conceptId']) == ('PPSA99008', '99008')
-assert value['contentId'] == 'UP9000-PPSA99008_00-PROSPEROEDEN0001'
+assert (value['titleId'], value['conceptId']) == ('PPSA99018', '99018')
+assert value['contentId'] == 'UP9000-PPSA99018_00-PROSPEROEDEN0001'
 assert value['localizedParameters']['en-US']['titleName'] == 'ProsperoEden Fork'
 assert value['pubtools']['loudnessSnd0'] == '-28.00'
 # The app version has one home, sce_sys/param.json: the program was built with the same value.
