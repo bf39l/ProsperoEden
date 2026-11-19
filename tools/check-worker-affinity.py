@@ -4,6 +4,11 @@ from pathlib import Path
 import subprocess,tempfile
 root=Path(__file__).resolve().parents[1]
 s=(root/'headless/performance.cpp').read_text();a=s.index('std::array<unsigned, 5> worker_cpus{};');body=s[a:s.index('\n#endif',a)]
+# The extracted native implementation also consumes this shared header state.
+# Use the production declaration so changes cannot silently drift from the fixture.
+pipeline_state = next(line for line in (root/'headless/performance.h').read_text().splitlines()
+                      if line.startswith('inline std::atomic<bool> pipeline_startup{'))
+
 code=r'''
 #include <array>
 #include <algorithm>
@@ -34,11 +39,27 @@ static int cpuset_setaffinity(int,int,int,size_t n,const cpuset_t* in){
  if(*in==fail_mask || (fail_restore && *in==0x1fff)) {errno=22;return -1;}
  current=*in;return 0;
 }
-'''+body+r'''
+'''+pipeline_state+'\n'+body+r'''
 int main(){
  for(unsigned i=0;i<64;++i) apics[i]=i;
  worker_topology_ready=false;CheckWorkerTopology();assert(worker_topology_ready && current==0x1fff);
  assert((worker_cpus==std::array<unsigned,5>{0,2,4,6,8}));
+ // Pipeline builders may use the full allowed mask only before the guest runs.
+ const auto spare = secondary_cpus;assert(spare && !(spare & (1ULL << worker_cpus[0])));
+ placement_secondary=true;pipeline_startup=true;
+ current=spare;PlaceSecondary("VkPipelineBuilder");assert(current==0x1fff && pipeline_builder && !pipeline_builder_settled);
+ SettlePipelineBuilderImpl();assert(current==0x1fff && !pipeline_builder_settled);
+ pipeline_startup=false;SettlePipelineBuilderImpl();assert(current==spare && pipeline_builder_settled);
+ current=3;SettlePipelineBuilderImpl();assert(current==3); // settles only once
+ // Other background workers stay on spare CPUs even during startup.
+ pipeline_builder=false;pipeline_builder_settled=false;pipeline_startup=true;
+ current=0x1fff;PlaceSecondary("ImageTranscode");assert(current==spare && !pipeline_builder);
+ // Disabled placement and unavailable startup affinity retain the safe behavior.
+ placement_secondary=false;current=3;PlaceSecondary("VkPipelineBuilder");assert(current==3);
+ placement_secondary=true;topology_allowed_valid=false;current=0x1fff;
+ PlaceSecondary("VkPipelineBuilder");assert(current==spare && pipeline_builder_settled);
+ topology_allowed_valid=true;pipeline_startup=false;placement_secondary=false;
+ current=0x1fff;
  cpuset_t allowed=current;PinWorker(4,allowed);assert(current==256 && allowed==256);
  // The probe's process-wide CPU set decides, not a narrower mask the thread inherited.
  current=0x1fff;allowed=3;PinWorker(4,allowed);assert(current==256 && allowed==256);
@@ -77,4 +98,4 @@ with tempfile.TemporaryDirectory() as tmp:
     exe=Path(tmp)/'affinity'
     subprocess.run(['c++','-std=c++20','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-x','c++','-','-o',str(exe)],input=code,text=True,check=True)
     subprocess.run([str(exe)],check=True)
-print('Worker topology: PASS physical sibling exclusion, OS/APIC permutations, allowed masks, the layout by timing, fallback and restoration failures, one probe per process')
+print('Worker topology: PASS physical sibling exclusion, OS/APIC permutations, allowed masks, the layout by timing, fallback and restoration failures, one probe per process; pipeline startup/spare affinity and one-time settlement')

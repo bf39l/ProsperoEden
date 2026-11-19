@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Host check of Eden patch 22: an indexed storage image array stays within what the pipelines bind.
+
+Fighting Force Collection (Oliv3rmoon/Nightshade#4): a compute shader indexes an array of storage
+images. Pinned Eden sizes such an array from the constant buffer space after its first handle,
+up to 1024 elements, and caps only sampled textures. With OpenGL the dispatch that first used it
+(when a game is picked on the collection's menu) pushed more views than the pipeline's fixed
+static_vector holds (64 textures + 16 images) and the session ended with
+"boost::container::bad_alloc thrown"; with Vulkan every element's handle was read, past the game's
+own array, as an empty texture descriptor ("texture format=0").
+
+This applies tools/eden-patches in order to the files they touch (from the pinned archive, its
+hash checked against UPSTREAM.json), checks that the storage image cap reaches both descriptor
+kinds and that OpenGL's limit is its graphics pipelines' 8 images, then compiles the patched
+functions themselves: the pinned count for an array at the start of a constant buffer is 1024;
+the patch gives each indexed array 8 elements (yuzu's count), so on Vulkan two arrays still reach
+element 7 each, and shares the room between arrays only where the host's limit, beside the
+shader's other storage images, cannot hold 8 for each (OpenGL's 8), never under one element: with
+OpenGL no shader of up to 7 other storage images and 8 arrays binds more than 8 images. Where
+Boost's headers are found it also shows the pinned count overflowing OpenGL's static_vector with
+the message the console logged.
+"""
+from pathlib import Path
+import hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile
+
+root = Path(__file__).resolve().parents[1]
+archive = Path(sys.argv[1]) if len(sys.argv) > 1 else root / '.deps/eden-d85bad89.tar.gz'
+pinned = json.loads((root / 'UPSTREAM.json').read_text())['archives']['eden-d85bad89.tar.gz']
+digest = hashlib.sha256()
+with archive.open('rb') as data:
+    for chunk in iter(lambda: data.read(1 << 20), b''):
+        digest.update(chunk)
+assert digest.hexdigest() == pinned, f'{archive} is not the pinned Eden archive'
+
+patches = sorted((root / 'tools/eden-patches').glob('*.diff'))
+assert root / 'tools/eden-patches/22-nightshade-indexed-storage-images.diff' in patches, [p.name for p in patches]
+touched = sorted({line[6:].split("\t")[0] for p in patches for line in p.read_text().splitlines()
+                  if line.startswith('+++ b/')})
+created = set()
+for patch in patches:
+    lines = patch.read_text().splitlines()
+    for before, after in zip(lines, lines[1:]):
+        if before.startswith('--- /dev/null') and after.startswith('+++ b/'):
+            created.add(after[6:].split('\t')[0])
+# The image limits of OpenGL's pipelines, as pinned (no patch changes them).
+limits = {'src/video_core/renderer_opengl/gl_graphics_pipeline.cpp': 'constexpr u32 MAX_IMAGES = 8;',
+          'src/video_core/renderer_opengl/gl_compute_pipeline.cpp': 'constexpr u32 MAX_IMAGES = 16;'}
+assert not set(limits) & set(touched)
+
+with tempfile.TemporaryDirectory() as tmp:
+    tree = Path(tmp) / 'eden'
+    tree.mkdir()
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            parts = member.name.split('/', 1)
+            if len(parts) != 2 or (parts[1] not in touched and parts[1] not in limits) or not member.isfile():
+                continue
+            assert member.size < 16 << 20, member.name
+            target = tree / parts[1]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tar.extractfile(member) as source, target.open('wb') as out:
+                shutil.copyfileobj(source, out)
+    missing = [name for name in [*touched, *limits] if name not in created and not (tree / name).is_file()]
+    for name in created:
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+    assert not missing, missing
+    # As tools/prepare-build.sh: every patch, in name order, onto the pinned files.
+    for patch in patches:
+        subprocess.run(['patch', '-d', str(tree), '-p1', '-N', '-s', '-i', str(patch)], check=True)
+
+    texture_pass = (tree / 'src/shader_recompiler/ir_opt/texture_pass.cpp').read_text()
+    gl_cache = (tree / 'src/video_core/renderer_opengl/gl_shader_cache.cpp').read_text()
+
+    def function_text(signature, closing='\n}\n'):
+        start = texture_pass.index(signature)
+        return texture_pass[start:texture_pass.index(closing, start) + len(closing)]
+
+    # The cap is computed once per shader and applied where both storage descriptor kinds are
+    # added, before the index clamp uses the count.
+    assert '    const u32 storage_dynamic_cap = DynamicStorageImageCap(host_info, to_replace);' in texture_pass
+    # Within the device's own limits: its storage images per set and its resources per stage.
+    assert ('(std::min)(host_info.max_descriptor_set_storage_images, host_info.max_per_stage_resources);'
+            in function_text('u32 DynamicStorageImageCap(const HostTranslateInfo& host_info, '
+                             'const TextureInstVector& to_replace) {'))
+    storage_case = texture_pass.split('        case IR::Opcode::ImageWrite: {', 1)[1].split('        default:', 1)[0]
+    capped = storage_case.index('                count = storage_dynamic_cap;')
+    assert capped < storage_case.index('index = descriptors.Add(ImageBufferDescriptor{'), 'image buffers'
+    assert capped < storage_case.index('index = descriptors.Add(ImageDescriptor{'), 'images'
+    assert 'EDEN_STORAGE_IMAGE_ARRAY cbuf=' in storage_case
+    clamp = texture_pass.index('inst->SetArg(0, ir.UMin(ir.ShiftRightLogical(cbuf.dynamic_offset, shift), '
+                               'ir.Imm32(count - 1)));')
+    assert texture_pass.index('        case IR::Opcode::ImageWrite: {') < clamp
+    # OpenGL's graphics pipelines hold 8 images (compute 16).
+    assert '        .max_descriptor_set_storage_images = 8,' in gl_cache
+    for name, value in limits.items():
+        assert value in (tree / name).read_text(), (name, value)
+
+    # The patched functions, compiled as they are.
+    function = function_text
+    constants = re.findall(r'^constexpr u32 (?:DESCRIPTOR_SIZE|DESCRIPTOR_MAX_COUNT|MAX_DYNAMIC_STORAGE_IMAGES) = [^;]+;',
+                           texture_pass, re.M)
+    assert len(constants) == 3, constants
+    code = '\n'.join([
+        '#include <algorithm>', '#include <bit>', '#include <cassert>', '#include <cstddef>', '#include <cstdint>',
+        '#include <utility>', '#include <vector>',
+        'using u32 = std::uint32_t;',
+        # Stand-ins for what the functions take from Eden: the host's limits, the instructions found.
+        'namespace boost::container { template <typename T, std::size_t N> using small_vector = std::vector<T>; }',
+        'struct HostTranslateInfo { u32 max_descriptor_set_storage_images; u32 max_per_stage_resources; };',
+        'struct ConstBufferAddr { u32 index; u32 offset; u32 count; };',
+        'struct Inst { bool storage; };',
+        'const Inst& IndexedInstruction(const Inst& inst) { return inst; }',
+        'bool IsStorageImageOpcode(const Inst& inst) { return inst.storage; }',
+        'struct TextureInst { ConstBufferAddr cbuf; Inst* inst; };',
+        'using TextureInstVector = std::vector<TextureInst>;',
+        *constants,
+        function('u32 DynamicDescriptorCount(u32 base_offset, u32 size_shift, u32 max_descriptors) {'),
+        function_text('struct StorageImageUse {', '\n};\n'),
+        function('StorageImageUse StorageImageUses(const TextureInstVector& to_replace) {'),
+        function('u32 StorageImageArrayCap(u32 host_limit, StorageImageUse use) {'),
+        function('u32 DynamicStorageImageCap(const HostTranslateInfo& host_info, const TextureInstVector& to_replace) {'),
+        r'''
+Inst storage{true}, sampled{false};
+// `statics` storage images by one handle each, `arrays` indexed arrays (each read and written), and
+// a sampled array beside them that does not count.
+TextureInstVector Shader(u32 statics, u32 arrays) {
+    TextureInstVector found;
+    for (u32 i = 0; i < statics; ++i) found.push_back({{1, 0x10 + 8 * i, 1}, &storage});
+    for (u32 i = 0; i < arrays; ++i) {
+        found.push_back({{2, 0x100 * i, 1024}, &storage});
+        found.push_back({{2, 0x100 * i, 1024}, &storage});
+    }
+    found.push_back({{3, 0, 1024}, &sampled});
+    return found;
+}
+int main() {
+    // An array whose first handle is at the start of the constant buffer, 8 bytes a handle, on a
+    // host that reports Eden's default limit (OpenGL, and RADV's are larger still): 1024 elements.
+    const u32 pinned = DynamicDescriptorCount(0x10, 3, DESCRIPTOR_MAX_COUNT);
+    assert(pinned == 1024);
+    // More than OpenGL's compute pipeline binds (64 textures + 16 images), which the console hit.
+    assert(pinned > 64 + 16);
+    // The same array read and written is one; sampled arrays are not storage images.
+    assert(StorageImageUses(Shader(3, 2)).static_images == 3 && StorageImageUses(Shader(3, 2)).dynamic_arrays == 2);
+    const HostTranslateInfo vulkan{8388606, 8388606}, opengl{8, 1024};
+    // Vulkan: every indexed array gets 8, however many there are: two arrays still reach element 5.
+    for (u32 arrays = 1; arrays <= 16; ++arrays) {
+        assert(DynamicStorageImageCap(vulkan, Shader(0, arrays)) == 8);
+        assert(DynamicStorageImageCap(vulkan, Shader(4, arrays)) == 8);
+    }
+    assert(5 < DynamicStorageImageCap(vulkan, Shader(0, 2)));
+    // The patched count for Fighting Force Collection's array: 8, not 1024, on either renderer.
+    assert(std::min(pinned, DynamicStorageImageCap(vulkan, Shader(0, 1))) == 8);
+    assert(std::min(pinned, DynamicStorageImageCap(opengl, Shader(0, 1))) == 8);
+    // OpenGL: the room its 8 images leave beside the shader's others is shared.
+    assert(DynamicStorageImageCap(opengl, Shader(2, 1)) == 6);
+    assert(DynamicStorageImageCap(opengl, Shader(0, 2)) == 4);
+    assert(DynamicStorageImageCap(opengl, Shader(0, 3)) == 2);
+    assert(DynamicStorageImageCap(opengl, Shader(0, 9)) == 1);
+    assert(DynamicStorageImageCap(opengl, Shader(8, 1)) == 1);
+    // And it holds: with up to 7 other storage images and 8 arrays a shader binds at most 8 images,
+    // within a graphics pipeline's 8 and a compute pipeline's 16 (beside its 64 textures, the 80
+    // views the console overflowed).
+    for (u32 statics = 0; statics <= 7; ++statics)
+        for (u32 arrays = 1; statics + arrays <= 8; ++arrays)
+            assert(statics + arrays * DynamicStorageImageCap(opengl, Shader(statics, arrays)) <= 8);
+    // A host that allows fewer, by its storage images or its resources per stage; never under one.
+    assert(StorageImageArrayCap(4, {0, 1}) == 4);
+    assert(DynamicStorageImageCap(HostTranslateInfo{8388606, 6}, Shader(0, 1)) == 6);
+    assert(StorageImageArrayCap(0, {0, 1}) == 1);
+    assert(StorageImageArrayCap(8, {0, 0}) == 8);
+    return 0;
+}
+'''])
+    exe = Path(tmp) / 'cap'
+    subprocess.run(['c++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-Wno-unused-const-variable',
+                    '-fsanitize=address,undefined', '-x', 'c++', '-', '-o', str(exe)],
+                   input=code, text=True, check=True)
+    subprocess.run([str(exe)], check=True)
+
+    # The console's message, from the pinned count in OpenGL's compute views (where Boost is).
+    boost_dirs = [Path(p) for p in ('/usr/include', '/usr/local/include', '/opt/homebrew/include')]
+    cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache')
+    boost_dirs += [h.parents[2] for h in sorted(cache.glob(
+        'ps5-eden-headless.*/source/.cache/cpm/boost*/*/boost/container/static_vector.hpp'))]
+    # Newer Eden fetches modular Boost sources; each library has its own include root.
+    modular = sorted(cache.glob('ps5-eden-headless.*/source/.cache/cpm/boost/*/libs/*/include'))
+    boost_dirs += modular
+    boost = next((d for d in boost_dirs if (d / 'boost/container/static_vector.hpp').is_file()), None)
+    built = False
+    if boost:
+        overflow = r'''
+#include <boost/container/static_vector.hpp>
+#include <cstdio>
+#include <cstring>
+int main() {
+    boost::container::static_vector<int, 64 + 16> views;  // gl_compute_pipeline.cpp
+    try {
+        for (int index = 0; index < 1024; ++index) views.push_back(index);
+    } catch (const std::exception& error) {
+        std::printf("%zu views, then: %s\n", views.size(), error.what());
+        return std::strcmp(error.what(), "boost::container::bad_alloc thrown") == 0 ? 0 : 1;
+    }
+    return 1;
+}
+'''
+        exe = Path(tmp) / 'overflow'
+        built = subprocess.run(['c++', '-std=c++20', '-I' + str(boost), *['-I' + str(d) for d in modular], '-x', 'c++', '-', '-o', str(exe)],
+                               input=overflow, text=True, capture_output=True).returncode == 0
+    if built:
+        shown = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout.strip()
+        assert shown == '80 views, then: boost::container::bad_alloc thrown', shown
+        print(f'Indexed storage images: the pinned 1024 elements overflow OpenGL\'s views ({shown})')
+    else:
+        print(f'Indexed storage images: no usable Boost headers here ({boost}); the static_vector overflow was not shown')
+print('Indexed storage images: PASS patch 22 applies with the set; each indexed array gets 8 elements on Vulkan '
+      'however many there are; OpenGL\'s 8 images are shared between arrays beside the shader\'s others, never '
+      'more than 8 in all; never under one element or over the host\'s limits')

@@ -89,8 +89,64 @@ builds on the following projects, each under its own license.
 ## Thanks
 
 ProsperoEden exists thanks to the Eden maintainers and contributors, Mihawk,
-mpereiraesaa, John Törnblom, SvenGDK, and the whole PS5 homebrew community.
+mpereiraesaa, John Törnblom, SvenGDK, [Oliv3rmoon](https://github.com/Oliv3rmoon)
+and the [Nightshade contributors](https://github.com/Oliv3rmoon/Nightshade),
+and the whole PS5 homebrew community.
 
 ## Lua 5.4.9
 
 Embedded launcher scripting runtime. Copyright Lua.org, PUC-Rio. MIT license; see `third_party/lua/LICENSE.txt`. Source and checksum: `third_party/lua/SOURCE.json`.
+
+## Fork lineage
+
+Thank you to [heydemoura](https://github.com/heydemoura) for the original
+[ProsperoEden fork](https://github.com/heydemoura/ProsperoEden) this fork started
+from, and to the original ProsperoEden and Eden authors and contributors credited
+above. The fork lineage does not replace those authors' existing notices.
+
+## Nightshade engine adaptations
+
+Selected changes are adapted from the user-supplied Nightshade validation
+1.010.015 snapshot (`Nightshade-nightshade-validation-1.010.015`), by
+[Oliv3rmoon](https://github.com/Oliv3rmoon) and the
+[Nightshade contributors](https://github.com/Oliv3rmoon/Nightshade), under
+GPL-3.0-or-later. Thank you for making these improvements available to reuse.
+
+These cover `headless/audio_queue.h`, guest-clock opt-in/session reset,
+`headless/guest_span.h`, their host checks, corresponding build adaptations,
+the adapted DMA-fill and indexed-image regression checks,
+and `tools/eden-patches/15-nightshade-*.diff` through
+`23-nightshade-*.diff`. Existing copyright/SPDX notices are retained.
+Additional engine adaptations cover reclaimable heap arenas and backing pages,
+direct-memory allocation/reuse, the guest-memory reserve (with this fork's fault
+recovery retained), graphics memory budgeting, staging buffers/chunks, ASTC
+conversion policy, kernel spin locks and adaptive idle polling, buffered shader
+cache reads, background pipeline loading and worker placement, shutdown ordering,
+newest-update selection, shared-font bounds, exact-size ZBIC decoding, unmapped
+access log throttling, close-with-report handling for GPU device loss, and bounded IPC/startup diagnostics (`ipc_ring.h`,
+`start_wait.h`, `unmapped_log.h` and associated checks, including the synthetic
+`tools/nso_files.py` fixtures). The associated headers, source
+adaptations and regression/soak checks are described in
+[docs/NIGHTSHADE-PORT.md](docs/NIGHTSHADE-PORT.md). Existing copyright and SPDX
+notices are retained; the integration adapts these changes to the newer Eden API.
+
+The shader and GPU patches also modify Eden/Yuzu code credited above; the
+port rebases formatting calls for Eden d85bad89 without changing the engine pin.
+
+### Final Fantasy diagnostic adaptations
+
+The pipeline identity/thread activity tracing and bounded reactive-flush,
+unmapped-read PC and guest-fault diagnostics are adapted from
+[Oliv3rmoon/Nightshade](https://github.com/Oliv3rmoon/Nightshade), validation
+1.010.015 and [v1.012.002](https://github.com/Oliv3rmoon/Nightshade/releases/tag/v1.012.002),
+under GPL-3.0-or-later. The GPU submission stall report is by Oliv3rmoon in
+[Belladonna commit 318deb146daa](https://github.com/Oliv3rmoon/Belladonna/commit/318deb146daa968b2367918b952377d95093a72a),
+under the modified Mesa files’ MIT licence; its original patch and authorship are retained in
+`tools/radv-submission-dump.diff`. Thank you to Oliv3rmoon and contributors.
+These adaptations retain this fork's Eden master pin and existing fixes.
+
+The driver adaptations modify Mesa/PS5 winsys files with their original MIT
+notices (Mihawk; Red Hat; Bas Nieuwenhuizen; Intel and other Mesa contributors);
+Oliv3rmoon authored the stall diagnostic additions. The standalone Nightshade
+diagnostic fixtures and this repository's adaptation scripts retain their
+GPL-3.0-or-later notices.

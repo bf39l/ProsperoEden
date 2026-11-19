@@ -11,6 +11,8 @@ inline bool disable_null_descriptor = false;
 inline bool static_vertex_input = true;
 inline bool disable_descriptor_buffer = false;
 inline bool robustness2 = false; // robustBufferAccess2 + robustImageAccess2
+// Storage atomics stay coherent by default; development builds can broaden the mode.
+inline int coherent_storage = 0;
 inline bool trace_pipelines = false; // report first pipeline uses to klog
 inline bool disable_sparse = false; // no sparse binding: multi-range SSBOs are gathered copies
 inline bool disable_multi_range = false; // bind multi-range SSBOs the pre-2026 way

@@ -9,6 +9,11 @@
 #include "assets_dir.h"
 #include "forwarded_launch.h"
 #include "gpu_failure.h"
+#include "guest_clock.h"
+#include "shader_start.h"
+#include "ipc_ring.h"
+#include "unmapped_log.h"
+#include "reactive_flush_log.h"
 #include "guest_fault.h"
 #include "jit_list.h"
 #include "boot_trace.h"
@@ -355,6 +360,10 @@ int main(int argc, char** argv) {
         static Eden::LogFlusher log_flusher;
         if (!log_flusher.Start(Eden::LoadPreferences().immediate_logs)) return 2;
         Eden::Crash::Install(Eden::LogsDir(), Eden::kAppVersion, last_crash.restarted);
+        // Record device loss immediately on the worker; do not attempt normal
+        // teardown or restart while the GPU is unresponsive.
+        Eden::gpu_stalled = &Eden::Crash::GpuStalled;
+        Eden::gpu_lost = [](const char* reason) noexcept { Eden::Crash::Fail(reason); };
         Eden::BootTrace::Ready(Eden::LogsDir(), Eden::FilesystemAccess());
         Eden::BootTrace::Line("logs and crash handler ready (%s)", Eden::LogsDir().c_str());
         for (const char* folder : {"/app0", Eden::kMountedAppDir, Eden::kInstallDir, "/mnt/sandbox/PPSA99018_000/app0"})
@@ -363,6 +372,7 @@ int main(int argc, char** argv) {
                                   Eden::FileExists(std::string{folder} + "/ui/fonts/montserrat-medium.pefont") ? "yes" : "no");
         Eden::BootTrace::Line("app folder: %s", Eden::AppDir().c_str());
         std::set_new_handler([] {
+            if (Eden::Performance::TrimHeap("an allocation found no memory", false) != 0) return;
             ps5_opengl_heap_snapshot("allocation_failure", 0);
             std::fflush(stdout);
             Eden::Report("allocation failure", "operator new: heap exhausted");
@@ -791,6 +801,7 @@ int main(int argc, char** argv) {
             Common::Log::SetGlobalFilter(filter);
         }
         Common::Log::Start();
+        Eden::Crash::SetLogFlush([] { Common::Log::Stop(); });
         SCOPE_EXIT { Common::Log::Stop(); };
 #ifdef PS5_NATIVE
         {
@@ -919,7 +930,8 @@ int main(int argc, char** argv) {
                     Eden::Performance::compose_delay_us = std::stoi(entry.substr(17));
                 } else if (entry.starts_with("idle_spin_us=")) {
                     // Guest cores spin this long on their interrupt flag before sleeping (W1).
-                    Eden::Performance::idle_spin_iterations = static_cast<unsigned>(std::stoul(entry.substr(13)) * 50);
+                    Eden::Performance::idle_poll_most_ns = static_cast<long long>(std::stoul(entry.substr(13))) * 1000;
+                    Eden::Performance::idle_poll_adaptive = false;
                 } else if (entry.starts_with("kspin=")) {
                     // PAUSE iterations a guest kernel spin lock retries before blocking (performance.h).
                     Eden::Performance::kernel_spin_iterations = static_cast<unsigned>(std::stoul(entry.substr(6)));
@@ -1269,6 +1281,15 @@ int main(int argc, char** argv) {
             // one is off unless chosen there, for every game or for this one. The levels start
             // every session at their exact values (above), so one that is not chosen is off.
             const auto speed = Eden::LoadPerformance(eden_game_title_id(guest));
+            // Nightshade: normal guest time by default; reset offsets between game sessions.
+            const bool adaptive_clock = Eden::LoadAdaptiveClock(eden_game_title_id(guest));
+            Eden::GuestClock::Reset(adaptive_clock);
+            Eden::IpcRing::Reset();
+            Eden::UnmappedLog::Reset();
+            Eden::ReactiveFlushLog::Reset();
+            Eden::ShaderStart::background = speed.background_shader_cache && backend == Eden::GraphicsBackend::Vulkan;
+            Eden::ShaderStart::SetProgress({});
+            Eden::Report("launch", adaptive_clock ? "Guest clock: adaptive workaround" : "Guest clock: normal");
             Settings::values.use_asynchronous_shaders = speed.async_shaders;
             if (speed.fast_gpu) {
                 // Nothing calls UpdateGPUAccuracy() here; set the live value too.
@@ -1601,6 +1622,7 @@ int main(int argc, char** argv) {
                 // load that finishes within it ends as a normal stop, one that does not ends with
                 // the app starting again at the launcher.
                 std::atomic<bool> left_while_loading{false};
+                std::stop_source shader_cache_stop;
                 std::jthread load_watch;
                 if (pad && game) load_watch = std::jthread([&](std::stop_token stop) {
                     while (!stop.stop_requested()) {
@@ -1616,6 +1638,7 @@ int main(int argc, char** argv) {
                         if (pad->TakeReturnToMenu() || asked) {
                             Eden::Report("exit", "Touchpad + L1 while the game loads: leaving as soon as it can be stopped");
                             Eden::StopLimit::Begin();
+                            shader_cache_stop.request_stop();
                             left_while_loading = true;
                             break;
                         }
@@ -1625,6 +1648,10 @@ int main(int argc, char** argv) {
 #endif
                 Eden::Loading::Set(Eden::Loading::Step::game);
                 Eden::BootTrace::Line("loading the game");
+                // Until the shader cache is built, pipeline builders may use every CPU: the guest
+                // has not started (performance.h pipeline_startup).
+                Eden::Performance::pipeline_startup.store(true, std::memory_order_release);
+                SCOPE_EXIT { Eden::Performance::pipeline_startup.store(false, std::memory_order_release); };
                 Core::SystemResultStatus loaded;
                 try {
                     loaded = system.Load(window, guest, params);
@@ -1695,31 +1722,43 @@ int main(int argc, char** argv) {
 #ifdef EDEN_PS5_OPENGL
                 // Match yuzu_cmd's ordering: GPU/context ready, cache load, guest Run.
                 if (Settings::values.use_disk_shader_cache.GetValue() && !graphics_error) {
-                    // Every cached pipeline is built before the game starts; report progress
-                    // every five seconds so a slow build can be told apart from a stalled one.
+                    // The game's saved pipelines (shader_start.h). While it plays, by default with
+                    // Vulkan: the load reads the driver's cache and returns, and the game starts now
+                    // (the build reports itself every five seconds). Otherwise every one is built
+                    // before the game starts, with progress every five seconds so a slow build can be
+                    // told apart from a stalled one, and leaving while it loads stops it.
+                    const bool background = Eden::ShaderStart::background.load();
                     std::atomic<size_t> built{0}, total{0};
                     std::atomic<bool> counted{false};
-                    Eden::Loading::Set(Eden::Loading::Step::shaders);
+                    if (!background) Eden::Loading::Set(Eden::Loading::Step::shaders);
                     const auto load_start = std::chrono::steady_clock::now();
-                    std::jthread reporter([&](std::stop_token stop) {
+                    std::jthread reporter;
+                    if (!background) reporter = std::jthread([&](std::stop_token stop) {
 #if defined(EDEN_DEV_PROFILE) && defined(PS5_NATIVE)
                         Eden::Stall::Trace("reporter start");
 #endif
                         for (unsigned tick = 1; !stop.stop_requested(); ++tick) {
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             if (tick % 50 != 0 || stop.stop_requested()) continue;
-                            const std::string line = counted
-                                ? std::format("Shader cache: {} of {} pipelines built ({} s)",
-                                              built.load(), total.load(), tick / 10)
-                                : std::format("Shader cache: reading ({} s)", tick / 10);
+                            // While the file is still being read its total is an estimate.
+                            const bool reading = Eden::ShaderStart::GetProgress().reading;
+                            const std::string line = !counted
+                                ? std::format("Shader cache: reading ({} s)", tick / 10)
+                                : std::format("Shader cache: {} of {}{} pipelines built ({} s)", built.load(),
+                                              reading ? "about " : "", total.load(), tick / 10);
                             Eden::Report("loader", line.c_str());
                         }
                     });
 #if defined(EDEN_DEV_PROFILE) && defined(PS5_NATIVE)
                     Eden::Stall::Trace("main cache_load");
 #endif
+#ifdef PS5_NATIVE
+                    const std::stop_token stop_cache = shader_cache_stop.get_token();
+#else
+                    const std::stop_token stop_cache{};
+#endif
                     system.Renderer().ReadRasterizer()->LoadDiskResources(
-                        system.GetApplicationProcessProgramID(), std::stop_token{},
+                        system.GetApplicationProcessProgramID(), stop_cache,
                         [&](VideoCore::LoadCallbackStage stage, size_t value, size_t count) {
                             if (stage != VideoCore::LoadCallbackStage::Build) return;
                             built = value;
@@ -1730,16 +1769,25 @@ int main(int argc, char** argv) {
                             Eden::Stall::Tick();
 #endif
                         });
-                    reporter.request_stop();
-                    reporter.join();
+                    if (reporter.joinable()) {
+                        reporter.request_stop();
+                        reporter.join();
+                    }
                     const auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - load_start).count();
-                    Eden::Report("loader", std::format("Shader cache ready: {} pipelines in {} ms",
-                                                       total.load(), load_ms).c_str());
+                    if (background)
+                        Eden::Report("loader", std::format("Shader cache: the game starts now, {} ms after the cache was "
+                                                           "opened; its pipelines are built while it runs",
+                                                           load_ms).c_str());
+                    else
+                        Eden::Report("loader", std::format("Shader cache ready: {} pipelines in {} ms",
+                                                           total.load(), load_ms).c_str());
                     std::puts("EDEN_SHADER_CACHE_LOADED");
                     std::fflush(stdout);
                 }
 #endif
+                // The guest starts now: builders go back to the spare CPUs as they next build.
+                Eden::Performance::pipeline_startup.store(false, std::memory_order_release);
 #ifndef PS5_NATIVE
                 if (devices) Eden::Mock::BeginGuestCycle();
 #endif
@@ -2169,6 +2217,7 @@ int main(int argc, char** argv) {
         }
         passed("core_destroyed");
 #ifdef EDEN_PS5_OPENGL
+        Eden::Performance::TrimHeap("the session ended");
         Eden::Performance::ReportSessionMemory("end", 0);
 #endif
         if (devices && pad) {

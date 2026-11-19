@@ -2,6 +2,28 @@
 
 What changed in each release of ProsperoEden, newest first. A release's notes on GitHub are its section here.
 
+## v1.000.001
+
+### Engine and compatibility
+
+- Adapt selected Nightshade validation 1.010.015 engine improvements for audio queues, guest timing, memory spans, shader atomics/coherence, indirect arguments, indexed storage images and DMA fills.
+- Add bounded background Vulkan shader-cache loading, buffered cache reads, layered ASTC conversion, staging-buffer sizing/chunking, adaptive idle polling and reclaimable heap/memory-pressure handling.
+- Fix timing-thread shutdown ordering, newest-update content selection and shared-font input bounds.
+- Reject incomplete ZBIC NSO segments; rate-limit repeated unmapped-access logs; retain the latest 64 service replies and report stalled startup at 45/90/180 seconds.
+- Write a crash report and close on GPU device loss instead of restarting against the failed GPU; retain ordinary crash recovery and non-device-loss worker shutdown.
+- Retain Eden `d85bad89`, LLVM 21, the PS5 64-file VFS cache, existing NCA/firmware handling, program switching, settings recovery and repeated guest-write recovery.
+
+### Launcher
+
+- Start the initial ROM scan in the background after a fully opened Home frame is displayed.
+- Keep Continue Playing → Game settings on Home while scanning, then open the requested game's settings; missing games and scan errors remain on Home.
+
+### Build and credits
+
+- Apply overlapping Eden patches as one verified stack and retain regression checks for the existing fork fixes.
+- Accommodate supported host checks under Apple Silicon Docker; native-x86 race checks and PS5 runtime validation remain separate. The long-session memory model still has one failing synthetic seed.
+- Credit and thank Oliv3rmoon/Nightshade, heydemoura/ProsperoEden and the original contributors. See [integration notes](NIGHTSHADE-PORT.md).
+
 ## v1.000.000
 
 First release under the `1.000.000` version series, based on the latest merged main.

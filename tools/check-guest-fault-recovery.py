@@ -29,12 +29,15 @@ SparseRange* WriteRangeOf(std::uintptr_t a) noexcept {
 bool LockSlot(SparseRange&, std::size_t slot, bool) noexcept {
  assert(slot == 0 && !locked);locked=true;const bool w=wait_next;wait_next=false;return w;
 }
-std::uint8_t SlotState(SparseRange&,std::size_t) noexcept {assert(locked);return current;}
+// Production SlotState is an atomic diagnostic read and may run before taking the lock.
+std::uint8_t SlotState(SparseRange&,std::size_t) noexcept {return current;}
 void UnlockSlot(SparseRange&,std::size_t,std::uint8_t to) noexcept {assert(locked);current=to;locked=false;}
 bool PromoteZero(SparseRange&,std::size_t) noexcept {++promoted;return !fail_promotion;}
 bool PromoteShared(SparseRange&,std::size_t) noexcept {++promoted;return !fail_promotion;}
 bool PromoteFine(SparseRange&,std::size_t) noexcept {++promoted;return !fail_promotion;}
 void Note(const char*) noexcept {}
+void Refused(std::uintptr_t, unsigned, std::uint8_t) noexcept {}
+template<class F> bool WaitForBlock(F) noexcept { return false; }
 '''
 tests = r'''
 int main(int argc,char** argv) {

@@ -7,6 +7,13 @@ root = Path(__file__).resolve().parents[1]
 scratch = Path((root / '.local/headless-cache').read_text().strip())
 code = (scratch / 'native-local/headless/block_of_code.cpp').read_text()
 assert ', EdenJitAllocator())' in code
+# Docker Desktop's Rosetta backend exposes VirtualApple in its x86 cpuinfo.
+# Its translated-code cache does not observe writes through a separate RW alias.
+# Keep native x86's live-rewrite check unchanged; only notify this translator.
+cpuinfo = Path('/proc/cpuinfo')
+translated = cpuinfo.exists() and 'VirtualApple' in cpuinfo.read_text()
+if translated:
+    print('JIT allocator: VirtualApple translation; refreshing RX permissions after alias rewrite', flush=True)
 source = r'''
 #include "jit-allocator.h"
 #include <cassert>
@@ -50,6 +57,7 @@ extern "C" int sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, size_t 
 }
 // The pool's two ends (src/direct_memory.c), which the heap and the sparse tables ask: not
 // used by this check either, and here the same mocked allocation.
+extern "C" int eden_direct_top_room(size_t, size_t, int, std::int64_t*) { return -1; }
 extern "C" int eden_direct_high(size_t size, size_t alignment, int type, std::int64_t* out) {
     return sceKernelAllocateDirectMemory(0, std::int64_t{1}<<40, size, alignment, type, out);
 }
@@ -109,6 +117,17 @@ int main() {
         assert(code->getCode<int(*)()>()()==42);
         fault(p,true); fault(writable,false);
         code->rewrite(1,84,4);
+        // Check the alias write before notifying a host CPU translator. This must
+        // still fail if rewrite writes the wrong address or the views diverge.
+        const unsigned char expected[] = {0xb8, 84, 0, 0, 0, 0xc3};
+        for (std::size_t i=0; i<sizeof(expected); ++i)
+            assert(p[i]==expected[i] && writable[i]==expected[i]);
+#ifdef EDEN_TEST_TRANSLATED_X86
+        // Host-test accommodation only: invalidate Rosetta's stale RX translation.
+        // Never grant RWX or change the production allocator's PS5 behavior.
+        assert(mprotect(const_cast<unsigned char*>(p),page,PROT_READ)==0);
+        assert(mprotect(const_cast<unsigned char*>(p),page,PROT_READ|PROT_EXEC)==0);
+#endif
         assert(code->getCode<int(*)()>()()==84);
         caches.push_back(std::move(code));
     }
@@ -178,6 +197,7 @@ with tempfile.TemporaryDirectory() as temp:
         subprocess.run(['clang++-21','-std=c++20','-O2','-I'+str(root/'headless'),
             '-I'+str(scratch/'native-local/headless/include'),
             '-I'+str(scratch/'source/.cache/cpm/xbyak/v7.40.1'),str(cpp),
+            *(['-DEDEN_TEST_TRANSLATED_X86=1'] if translated else []),
             *(['-DEDEN_JIT_ALIAS_NATIVE=1','-DPS5_NATIVE=1','-Wl,--wrap=mprotect'] if native_mock else []),
             str(root/'src/memory_pages.cpp'),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True, cwd=temp)

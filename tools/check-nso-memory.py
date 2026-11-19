@@ -36,7 +36,7 @@ struct PatchManager { bool patched{}; bool HasNSOPatch(int,const std::string&)co
 struct Memory {size_t address{},length{};bool fail{};bool ZeroBlock(size_t a,size_t n){address=a;length=n;return !fail;}} memory;
 struct Process {Memory& GetMemory(){return memory;}} process;
 // No ZBIC encoder here: a segment that does not decode must end the load.
-namespace Common::Compression {int DecompressDataZBIC(std::span<u8>,std::span<const u8>){return 0;}}
+namespace Common::Compression {int zbic_result=0;int DecompressDataZBIC(std::span<u8>,std::span<const u8>){return zbic_result;}}
 namespace Common::Compression {int DecompressDataLZ4(u8* d,size_t n,const u8*s,size_t m){return LZ4_decompress_safe((const char*)s,(char*)d,m,n);}}
 int constructions=0;
 namespace Kernel {struct CodeSet { struct Segment {size_t addr{},offset{};u32 size{};}; std::vector<u8>memory;std::array<Segment,3>segments; CodeSet(){++constructions;} Segment&DataSegment(){return segments[2];}};}
@@ -70,7 +70,12 @@ int main(){
  assert(load(h,f,true)==size && image==reference);
  f.short_read=true;assert(!load(h,f,true));f.short_read=false;
  h.segments_compressed_size[0]=1;assert(!load(h,f,true));
- h.segments_compressed_size[0]=n;h.zbic=true;assert(!load(h,f,true));h.zbic=false;
+ h.segments_compressed_size[0]=n;h.zbic=true;assert(!load(h,f,true));
+ Common::Compression::zbic_result=3;assert(!load(h,f,true)); // positive but short: must reject
+ Common::Compression::zbic_result=5;assert(!load(h,f,true)); // longer than the segment: reject
+ Common::Compression::zbic_result=4;assert(load(h,f,true)); // exact size: accepted
+ Common::Compression::zbic_result=-1;assert(!load(h,f,true));
+ Common::Compression::zbic_result=0;h.zbic=false;
  h.flags=0;h.segments[0].offset=0;h.segments_compressed_size[0]=4;
  h.segments[2].bss_size=1800u*1024*1024;int before=constructions;
  assert(load(h,f,false) && constructions==before); // No large allocation for layout.

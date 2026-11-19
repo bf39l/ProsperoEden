@@ -94,6 +94,7 @@ void Launcher::say(const std::string &text, bool warning)
 
 void Launcher::open(Screen screen, bool forward)
 {
+    if (screen != Screen::home) pending_home_settings_.clear();
     leaving_ = screen_;
     screen_ = screen;
     forward_ = forward;
@@ -204,6 +205,7 @@ void Launcher::start_game(const std::string &file, const std::string &title, con
         cue(Cue::error);
         return;
     }
+    pending_home_settings_.clear();
     selected_game_ = commit_launch(services_, file);
     if (selected_game_.empty()) { say(tr("Game cannot start now."), true); cue(Cue::error); return; }
     launch_title_ = title;
@@ -329,6 +331,7 @@ void Launcher::update(float dt)
             textures_.clear_game_backdrop();
     }
     textures_.pump(dt);
+    maybe_start_initial_scan(dt);
     finish_scan();
     poll_sources(dt);
     poll_save_sync(dt);

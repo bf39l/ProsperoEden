@@ -86,10 +86,17 @@ std::string changes_text(int changes)
 
 void Launcher::frame_presented()
 {
-    if (screen_ != Screen::home || modal_shown_ != Modal::none || opening_on_ || done_ ||
-        initial_scan_requested_)
-        return;
-    if (scan_.valid() || games_loaded_)
+    // A successful swap only records readiness. No file work runs on the first frame.
+    if (screen_ == Screen::home && !opening_on_)
+        home_frame_presented_ = true;
+}
+
+void Launcher::maybe_start_initial_scan(float dt)
+{
+    initial_scan_retry_wait_ = std::max(0.0f, initial_scan_retry_wait_ - dt);
+    if (!home_frame_presented_ || opening_on_ || done_ || !selected_game_.empty() ||
+        modal_ != Modal::none || screen_ != Screen::home || initial_scan_retry_wait_ > 0.0f ||
+        initial_scan_requested_ || scan_.valid() || games_loaded_)
         return;
     start_scan();
 }
@@ -101,10 +108,13 @@ void Launcher::start_scan()
         initial_scan_requested_ = true;
         try
         {
+            sys::log("game list: starting background scan");
             scan_ = std::async(std::launch::async, [this] { return services_.games(); });
         }
         catch (const std::exception &error)
         {
+            initial_scan_requested_ = false;
+            initial_scan_retry_wait_ = 2.0f;
             sys::log("could not start game list scan: %s", error.what());
         }
     }
@@ -135,23 +145,30 @@ static std::string shown_name(const gfx::Font *font, const std::string &name, co
 
 void Launcher::finish_scan()
 {
-    if (!scan_.valid())
-        return;
-    if (scan_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-        return;
-    try
+    if (scan_.valid())
     {
-        apply_games(scan_.get());
+        if (scan_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return;
+        try
+        {
+            apply_games(scan_.get());
+        }
+        catch (const std::exception &error)
+        {
+            sys::log("game list: %s", error.what());
+            games_loaded_ = true; // keep the previous list
+        }
+        catch (...)
+        {
+            sys::log("game list: unexpected scan failure");
+            games_loaded_ = true;
+        }
     }
-    catch (const std::exception &error)
+    if (games_loaded_ && !pending_home_settings_.empty() && selected_game_.empty() &&
+        screen_ == Screen::home && modal_ == Modal::none)
     {
-        sys::log("game list: %s", error.what());
-        games_loaded_ = true; // the list stays as it was
-    }
-    catch (...)
-    {
-        sys::log("game list: unexpected scan failure");
-        games_loaded_ = true;
+        const std::string requested = std::exchange(pending_home_settings_, {});
+        open_game_settings_from_home(requested);
     }
 }
 

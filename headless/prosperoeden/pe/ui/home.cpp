@@ -59,21 +59,36 @@ Rect pad_rect(int player)
 
 void Launcher::open_game_settings_from_home(const std::string &file)
 {
-    // The page belongs to the Library's list: the Library opens at that game, its page over it.
-    open(Screen::library, true);
-    enter_library();
-    for (int i = 0; i < static_cast<int>(games_.size()); ++i)
+    if (file.empty()) return;
+    const std::string requested = file;
+    // Keep Home responsive while the initial list (or a rescan) is reading. The
+    // completed future opens this exact game's page; no wait or empty Library detour.
+    if (!games_loaded_ || scan_.valid())
     {
-        if (games_[static_cast<std::size_t>(i)].file != file)
-            continue;
-        library_.reset(library_.count, i);
-        refresh_selected_game();
-        sync_grid(true);
-        press_library(Key::triangle);
-        game_from_home_ = modal_ == Modal::game;
+        pending_home_settings_ = requested;
+        start_scan();
+        say(tr("Reading game list..."));
         return;
     }
-    // Not in the list any more: the Library shows what there is.
+    const auto found = std::find_if(games_.begin(), games_.end(), [&](const Game &game)
+                                  { return game.file == requested; });
+    if (found == games_.end())
+    {
+        pending_home_settings_.clear();
+        say(tr("Game is no longer available."), true);
+        return;
+    }
+    const int selected = static_cast<int>(found - games_.begin());
+    pending_home_settings_.clear();
+    open(Screen::library, true);
+    // The loaded list already owns this game; do not start another metadata scan here.
+    library_.wrap = false;
+    library_opened_ = true;
+    library_.reset(static_cast<int>(games_.size()), selected);
+    refresh_selected_game();
+    sync_grid(true);
+    press_library(Key::triangle);
+    game_from_home_ = modal_ == Modal::game;
 }
 
 void Launcher::press_home(Key key)

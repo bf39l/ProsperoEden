@@ -23,9 +23,6 @@ scratch=$(cat .local/headless-cache)
 
 eden="$scratch/source"
 eden_archive=eden-d85bad89.tar.gz
-# Eden's archive stores the source under one top-level directory; GNU tar's --wildcards is not
-# portable (bsdtar lacks it), so remember that directory and extract by exact path instead.
-eden_topdir=$(tar -tzf ".deps/$eden_archive" | sed -n '1s|/.*||p')
 # A tree unpacked from another archive is the source of another Eden revision: it is unpacked
 # again (Eden's package cache, downloads only, is kept). A tree left from before an update of
 # the pin was built as if it were the new one, and what Eden had changed went unseen.
@@ -40,19 +37,10 @@ if [[ ! -f $eden/CMakeLists.txt || $(cat "$eden/.unpacked-from" 2>/dev/null) != 
 fi
 printf '%s\n' 'd85bad89248fcae68f812d7e1c937436261404cb' > "$eden/GIT-COMMIT"
 printf '%s\n' 'ps5-headless' > "$eden/GIT-REFSPEC"
-# Fixes to Eden's own source (tools/eden-patches, in name order), each applied once: a patch that
-# reverses cleanly is already in the tree. One that neither reverses nor applies was changed after
-# an earlier version of it went in: the files it touches come back from the pinned archive first.
-command -v patch >/dev/null || { echo "patch is required (apt install patch)" >&2; exit 1; }
-for eden_patch in tools/eden-patches/*.diff; do
-    if patch -d "$eden" -p1 -R --dry-run -s -f < "$eden_patch" >/dev/null 2>&1; then continue; fi
-    step "Eden patch $(basename "$eden_patch")"
-    if ! patch -d "$eden" -p1 -N --dry-run -s -f < "$eden_patch" >/dev/null 2>&1; then
-        sed -n 's|^+++ b/||p' "$eden_patch" | sed "s|^|$eden_topdir/|" |
-            xargs tar -xzf ".deps/$eden_archive" --strip-components=1 -C "$eden"
-    fi
-    patch -d "$eden" -p1 -N -s < "$eden_patch" || { echo "$eden_patch does not apply to Eden's source" >&2; exit 1; }
-done
+# Apply the complete stack together: later patches can depend on earlier changes
+# to the same files. Repeated builds verify a receipt instead of undoing those hunks.
+python3 -B tools/check-eden-patches.py
+python3 -B tools/apply-eden-patches.py "$eden" ".deps/$eden_archive"
 # Optional: seed Eden's package cache from another checkout's (CI reuses a development cache).
 if [[ -n ${EDEN_CPM_CACHE_SEED:-} && ! -d $eden/.cache/cpm ]]; then
     step "Eden package cache from $EDEN_CPM_CACHE_SEED"
@@ -101,7 +89,8 @@ if [[ -f $radv_release/lib/libvulkan_radeon.ps5.a ]]; then
     elif ! python3 -B tools/patch-radv-wsi.py --check "$radv_release/EDEN_WSI_SHA256" ||
          ! python3 -B tools/patch-radv-gs-compute.py --check "$radv_release/EDEN_GS_SHA256" ||
          ! python3 -B tools/patch-radv-disk-cache.py --check "$radv_release/EDEN_DISK_CACHE_SHA256" ||
-         ! python3 -B tools/patch-radv-transfer-split.py --check "$radv_release/EDEN_TRANSFER_SPLIT_SHA256"; then
+         ! python3 -B tools/patch-radv-transfer-split.py --check "$radv_release/EDEN_TRANSFER_SPLIT_SHA256" ||
+         ! python3 -B tools/patch-radv-submission-dump.py --check "$radv_release/EDEN_SUBMISSION_DUMP_SHA256"; then
         step "RADV: this repository's adaptation of the driver changed"
         bash tools/build-radv-dependencies.sh
         rm -f build/radv-isolated/libvulkan_radeon.ps5.a

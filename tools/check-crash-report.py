@@ -48,6 +48,7 @@ PROGRAM = r'''
 
 // The app's two ways out (src/lifecycle.c on the console).
 static bool refuse;
+extern "C" void eden_gpu_stalled(void);
 extern "C" int eden_restart_app(void) {
     if (refuse) return -1;
     (void)!write(1, "RESTART\n", 8);
@@ -190,6 +191,19 @@ int main(int argc, char** argv) {
             Eden::Crash::NameThread("Thrower");
             throw std::runtime_error("test exception: nothing caught it");
         }).join();
+    if (mode == "lost")
+        std::thread([] { throw std::runtime_error("VK_ERROR_DEVICE_LOST"); }).join();
+    if (mode == "fail-lost")
+        Eden::Crash::Fail("VK_ERROR_DEVICE_LOST");
+    if (mode == "stalled")
+        eden_gpu_stalled();
+    if (mode == "doing")  // the driver faults while it compiles a pipeline (tools/prepare-vulkan-port.py)
+        std::thread([] {
+            Eden::Crash::NameThread("VkPipelineBuilder");
+            { const Eden::Crash::Doing done{"finished work", 1}; }
+            const Eden::Crash::Doing building{"the driver compiling compute pipeline cs", 0x8228ff6df5537affull};
+            Outer(reinterpret_cast<volatile int*>(bad));
+        }).join();
     const auto crash = [] {
         Eden::Crash::NameThread("CPUCore_1");
         Outer(reinterpret_cast<volatile int*>(bad));
@@ -322,6 +336,23 @@ def check(binary, console):
         (status, report[:400], err[-400:])
     assert '\nthread: Thrower (0x' in report and note.endswith(' 1\n')
 
+    # A fault while the thread says what it is doing (Doing): the report names it after the thread.
+    status, out, err, reports, note = run(binary, 'doing', console)
+    report = reports[0].read_text() if reports else ''
+    assert status == 42 and re.search(r'^thread: VkPipelineBuilder \(0x[0-9a-f]+\)\n'
+                                      r'doing: the driver compiling compute pipeline cs 8228ff6df5537aff\n'
+                                      r'running: ', report, re.M), (status, report[:600], err[-400:])
+    assert 'finished work' not in report
+
+    # GPU loss closes after writing the report. Cover an uncaught Vulkan
+    # exception, an explicit worker failure callback, and a fault after a driver stall.
+    for mode in ('lost', 'fail-lost', 'stalled'):
+        status, out, err, reports, note = run(binary, mode, console)
+        report = reports[0].read_text() if reports else ''
+        assert status == 43 and out == 'EXIT\n' and len(reports) == 1 and note.endswith(' 0\n'), (mode, status, out, note, err[-400:])
+        assert report.endswith('then: the app closes (the GPU stopped responding, and an app started again would find it stuck)\n'), (mode, report[-300:])
+        if mode != 'stalled': assert 'reason: VK_ERROR_DEVICE_LOST\n' in report
+
     # Four threads at once: one report, one restart.
     status, out, err, reports, note = run(binary, 'many', console)
     assert status == 42 and out == 'RESTART\n' and len(reports) == 1, (status, out, len(reports))
@@ -349,5 +380,6 @@ with tempfile.TemporaryDirectory(prefix='eden-crash-') as work:
     check(build(work, 'host', []), False)
     check(build(work, 'console-calls', ['-DPS5_NATIVE']), True)
 print('Crash report: signal, address, thread, session, registers and calls; abort, illegal instruction and '
-      'uncaught exception; one report for many threads; no restart loop; refusal falls back to the system; '
+      'uncaught exception; device loss/stall closes with a report; ordinary recovery retained; '
+      'one report for many threads; no restart loop; refusal falls back to the system; '
       'unreadable memory; logs kept beside five reports; functions named from the report PASS')

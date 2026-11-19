@@ -1,0 +1,105 @@
+--- a/src/shader_recompiler/ir_opt/texture_pass.cpp
++++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
+@@ -10,8 +10,10 @@
+ #include "common/container/unordered_map.h"
+ #include <tuple>
+ #include <limits>
++#include <utility>
+ #include <boost/container/small_vector.hpp>
+ 
++#include "common/logging.h"
+ #include "common/settings.h"
+ #include "shader_recompiler/environment.h"
+ #include "shader_recompiler/frontend/ir/basic_block.h"
+@@ -197,8 +199,58 @@
+         }
+     }
+     return count;
++}
++
++// A storage image (or image buffer) indexed by a value the shader computes is sized from the
++// constant buffer space after its first handle, up to DESCRIPTOR_MAX_COUNT elements, and only
++// sampled textures had a cap. Every element is bound at each draw or dispatch, its handle read
++// from the constant buffer: past the game's own array those words are other data read as
++// handles (empty texture descriptors), and OpenGL keeps a pipeline's views in fixed arrays (64
++// textures and 16 images in compute, 8 in graphics), so a longer array ended the session with
++// boost::container::bad_alloc or wrote past them. The shader keeps its index within the array
++// (UMin below), so a shorter array clamps the access instead.
++// Each such array gets MAX_DYNAMIC_STORAGE_IMAGES elements, what yuzu bound for every indexed
++// descriptor. Only where the host's storage image limit cannot hold that many for every array
++// beside the shader's other storage images (OpenGL reports 8) is the room left shared between the
++// arrays, never under one element each.
++constexpr u32 MAX_DYNAMIC_STORAGE_IMAGES = 8;
++
++struct StorageImageUse {
++    u32 static_images{};  // storage images the shader names by one handle each
++    u32 dynamic_arrays{}; // storage image arrays it indexes
++};
++
++StorageImageUse StorageImageUses(const TextureInstVector& to_replace) {
++    boost::container::small_vector<std::pair<u32, u32>, 8> statics, arrays;
++    for (const TextureInst& inst : to_replace) {
++        if (!IsStorageImageOpcode(IndexedInstruction(*inst.inst))) {
++            continue;
++        }
++        auto& seen = inst.cbuf.count > 1 ? arrays : statics;
++        const std::pair<u32, u32> handle{inst.cbuf.index, inst.cbuf.offset};
++        if (std::ranges::find(seen, handle) == seen.end()) {
++            seen.push_back(handle);
++        }
++    }
++    return {static_cast<u32>(statics.size()), static_cast<u32>(arrays.size())};
++}
++
++// host_limit: the storage images a stage can bind.
++u32 StorageImageArrayCap(u32 host_limit, StorageImageUse use) {
++    if (use.dynamic_arrays == 0) {
++        return MAX_DYNAMIC_STORAGE_IMAGES;
++    }
++    const u32 room = host_limit > use.static_images ? host_limit - use.static_images : 0;
++    return (std::max)(1U, (std::min)(MAX_DYNAMIC_STORAGE_IMAGES, room / use.dynamic_arrays));
+ }
+ 
++u32 DynamicStorageImageCap(const HostTranslateInfo& host_info, const TextureInstVector& to_replace) {
++    // A Vulkan device's own limits (large on RADV), or OpenGL's 8 (gl_shader_cache.cpp).
++    const u32 host_limit =
++        (std::min)(host_info.max_descriptor_set_storage_images, host_info.max_per_stage_resources);
++    return StorageImageArrayCap(host_limit, StorageImageUses(to_replace));
++}
++
+ bool IsBindless(const IR::Inst& inst) {
+     switch (inst.GetOpcode()) {
+     case IR::Opcode::BindlessImageSampleImplicitLod:
+@@ -690,6 +742,7 @@
+         program.info.image_descriptors,
+     };
+     const u32 sampled_dynamic_cap = DynamicSampledTextureCap(program.info, host_info, DynamicSampledTextureArrayCount(to_replace));
++    const u32 storage_dynamic_cap = DynamicStorageImageCap(host_info, to_replace);
+     bool has_last_is_integer{false};
+     u32 last_cbuf_index{};
+     u32 last_cbuf_offset{};
+@@ -770,6 +823,11 @@
+             const bool is_written{inst->GetOpcode() != IR::Opcode::ImageRead};
+             const bool is_read{inst->GetOpcode() != IR::Opcode::ImageWrite};
+             const bool is_integer{is_texture_pixel_format_integer(cbuf)};
++            if (count > storage_dynamic_cap) {
++                LOG_WARNING(Shader, "EDEN_STORAGE_IMAGE_ARRAY cbuf={} offset={:#x} elements={} bound={}",
++                            cbuf.index, cbuf.offset, count, storage_dynamic_cap);
++                count = storage_dynamic_cap;
++            }
+             if (flags.type == TextureType::Buffer) {
+                 index = descriptors.Add(ImageBufferDescriptor{
+                     .format = flags.image_format,
+--- a/src/video_core/renderer_opengl/gl_shader_cache.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_cache.cpp
+@@ -258,7 +258,9 @@
+         .max_descriptor_set_storage_buffers_dynamic =
+             Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
+         .max_descriptor_set_sampled_images = Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
+-        .max_descriptor_set_storage_images = Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
++        // A graphics pipeline holds 8 images (gl_graphics_pipeline.cpp MAX_IMAGES), a compute
++        // one 16: an indexed storage image array is kept within the smaller (texture_pass.cpp).
++        .max_descriptor_set_storage_images = 8,
+         .max_descriptor_set_input_attachements =
+             Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
+         .support_float64 = true,

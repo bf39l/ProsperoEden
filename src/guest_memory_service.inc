@@ -84,7 +84,18 @@ std::uintptr_t SlotAddress(SparseRange& range, std::size_t slot) noexcept {
 }
 
 // ---- Blocks: the pool, a reserve for when the pool says no, and shared blocks' references ----
-constexpr std::size_t ReserveBlocks = 16; // 32 MiB
+//
+// The reserve is the guest's headroom in the pool, held as blocks of its own: 1 GiB that a game's
+// writes take when the pool has no block left. It used to be 32 MiB here, plus 1 GiB that the
+// graphics caches only counted as taken (headless/performance.cpp): that 1 GiB stayed in the pool,
+// where Eden's heap, the driver and the caches themselves could take it, and where 2 MiB blocks
+// could no longer be cut from what was left. Tears of the Kingdom's writes found no block four
+// times with the pool's largest free block at 1 or 2 MiB. Held here, nothing else can take it or
+// cut it up; the caches see the pool as it is, less what is not held yet, and evict as soon as a
+// burst of writes has used half of it (performance.h ViewOfPool). It is topped up every 100 ms
+// (ReserveKeeper) and given back with the guest's memory when the session ends.
+constexpr std::size_t ReserveBlocks = 512;      // 1 GiB
+constexpr std::size_t ReserveAtStart = 16;      // taken as the service starts; the keeper takes the rest
 std::int64_t reserve[ReserveBlocks];
 std::atomic<std::size_t> reserve_count{0};
 std::atomic_flag reserve_lock = ATOMIC_FLAG_INIT;
@@ -111,17 +122,19 @@ bool ReserveBlock(std::int64_t* physical) noexcept {
     if (ok) counters.reserve_used.fetch_add(1, std::memory_order_relaxed);
     return ok;
 }
-void FillReserve() noexcept {
+// Zeroed blocks into the reserve until it holds `blocks` (at most ReserveBlocks) or the pool says no.
+void FillReserve(std::size_t blocks = ReserveBlocks) noexcept {
+    blocks = std::min(blocks, ReserveBlocks);
     for (;;) {
         Spin(reserve_lock);
-        const bool full = reserve_count.load(std::memory_order_relaxed) >= ReserveBlocks;
+        const bool full = reserve_count.load(std::memory_order_relaxed) >= blocks;
         reserve_lock.clear(std::memory_order_release);
         if (full) return;
         std::int64_t physical = -1;
         if (!ZeroedBlock(&physical)) return;
         Spin(reserve_lock);
         const std::size_t count = reserve_count.load(std::memory_order_relaxed);
-        if (count < ReserveBlocks) {
+        if (count < blocks) {
             reserve[count] = physical;
             reserve_count.store(count + 1, std::memory_order_relaxed);
             physical = -1;
@@ -403,7 +416,82 @@ SparseRange* WriteRangeOf(std::uintptr_t address) noexcept {
 }
 std::atomic<std::uintptr_t> probe_expected{0}; // the self-test's write, whatever si_addr says
 std::atomic<bool> probe_mismatch{false};
+// The last write the service refused, for the crash report: the address, then why (1: it faulted
+// again and again with nothing to change, 2: no block was left for its slot) and the slot's state.
+std::atomic<std::uintptr_t> refused_address{0};
+std::atomic<unsigned> refused_detail{0}; // why | state << 8
+void Refused(std::uintptr_t address, unsigned why, std::uint8_t state) noexcept {
+    refused_detail.store(why | unsigned{state} << 8, std::memory_order_relaxed);
+    refused_address.store(address, std::memory_order_release);
+}
 } // namespace
+
+// The last write the service refused (headless/crash_report.cpp): its address, 0 for none.
+extern "C" std::uintptr_t eden_guest_write_refused(unsigned* why, unsigned* state) noexcept {
+    const std::uintptr_t address = refused_address.load(std::memory_order_acquire);
+    const unsigned detail = refused_detail.load(std::memory_order_relaxed);
+    *why = detail & 0xff;
+    *state = detail >> 8;
+    return address;
+}
+
+namespace {
+// Writers waiting for a block (WaitForBlock), and how many waits ended with one.
+std::atomic<unsigned> memory_waiters{0};
+std::atomic<std::uint64_t> memory_waits_won{0}, memory_waits_lost{0};
+
+// No block was left for a written slot. Most of what the pool gives out is held by the graphics
+// caches, which free what is not drawn once they see memory short (headless/performance.cpp reads
+// eden_guest_memory_wanted, and while a writer waits the caches see no free memory at all). The
+// game's own memory comes first: a large open-world game wrote 1.8 GB of new memory within 10 s
+// after 23 minutes of play, faster than the caches free at the end of each frame, and the write
+// that found no block ended the session. So the writer waits here, in its fault handler, and tries
+// again every 20 ms for up to 2 s while the caches give memory back. Only then is it refused.
+template <typename Promote>
+bool WaitForBlock(Promote&& promote) noexcept {
+    memory_waiters.fetch_add(1, std::memory_order_acq_rel);
+    bool ok = false;
+    for (unsigned tries = 0; tries < 100 && !ok; ++tries) {
+        const timespec pause{0, 20'000'000};
+        nanosleep(&pause, nullptr);
+        ok = promote();
+    }
+    memory_waiters.fetch_sub(1, std::memory_order_acq_rel);
+    (ok ? memory_waits_won : memory_waits_lost).fetch_add(1, std::memory_order_relaxed);
+    Note(ok ? "EDEN_CRAM a written slot waited for the graphics caches to give memory back, and got a block\n"
+            : "EDEN_CRAM a written slot waited 2 s for memory and found no block\n");
+    return ok;
+}
+} // namespace
+
+// How many writes of the guest's memory are waiting for a block now (headless/performance.cpp):
+// while any is, the graphics caches are told no memory is free.
+extern "C" unsigned eden_guest_memory_wanted(void) noexcept {
+    return memory_waiters.load(std::memory_order_acquire);
+}
+
+// The guest's headroom (the reserve): what it holds and what it is to hold, in bytes; both 0 while
+// the service does not run or keeps no reserve (the host). headless/performance.cpp counts what is
+// not held yet as taken, as all of it was before.
+extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) noexcept {
+#ifdef PS5_NATIVE
+    const bool running = service_range.load(std::memory_order_acquire) != nullptr;
+    *held = running ? reserve_count.load(std::memory_order_relaxed) * SparseSlot : 0;
+    *target = running ? ReserveBlocks * SparseSlot : 0;
+#else
+    *held = 0;
+    *target = 0;
+#endif
+}
+
+// How the waits ended so far, and the writes refused for want of a block (headless/performance.cpp
+// ReportMemory prints them beside what holds the pool).
+extern "C" void eden_guest_memory_waits(unsigned long long* won, unsigned long long* lost,
+                                        unsigned long long* refused) noexcept {
+    *won = memory_waits_won.load(std::memory_order_relaxed);
+    *lost = memory_waits_lost.load(std::memory_order_relaxed);
+    *refused = counters.failures.load(std::memory_order_relaxed);
+}
 
 // A write fault at `address`: true when it was a write to a slot of the guest's memory that is
 // now writable (the faulting instruction repeats), false for anything else.
@@ -415,17 +503,20 @@ bool HandleGuestWriteFault(void* fault) noexcept {
     }
     SparseRange* const range = WriteRangeOf(address);
     if (range == nullptr) return false;
-    // The same address faulting again and again is not a slot to promote but a real fault.
+    const std::size_t slot = (address - range->begin.load(std::memory_order_relaxed)) / SparseSlot;
+    // The same address faulting again and again with nothing to change is not a slot to promote
+    // but a real fault. A promotion starts the count again (below).
     static thread_local std::uintptr_t last = 0;
     static thread_local unsigned repeats = 0;
     repeats = address == last ? repeats + 1 : 1;
     last = address;
     if (repeats > 16) {
         repeats = 0;
+        Refused(address, 1, SlotState(*range, slot));
+        Note("EDEN_CRAM refused a write: 17 faults in a row at one address, its slot unchanged\n");
         return false;
     }
     counters.faults.fetch_add(1, std::memory_order_relaxed);
-    const std::size_t slot = (address - range->begin.load(std::memory_order_relaxed)) / SparseSlot;
     const bool waited = LockSlot(*range, slot, true);
     const std::uint8_t state = SlotState(*range, slot);
     if (waited) {
@@ -434,27 +525,32 @@ bool HandleGuestWriteFault(void* fault) noexcept {
         UnlockSlot(*range, slot, state);
         return true;
     }
-    bool ok = true;
-    if (state == SlotFine) {
-        ok = PromoteFine(*range, slot);
-    } else if (state == SlotZero) {
-        ok = PromoteZero(*range, slot);
-        if (ok) counters.promotions.fetch_add(1, std::memory_order_relaxed);
-    } else if (state == SlotShared) {
-        ok = PromoteShared(*range, slot);
-    }
+    const auto promote = [&]() noexcept {
+        bool done = true;
+        if (state == SlotFine) {
+            done = PromoteFine(*range, slot);
+        } else if (state == SlotZero) {
+            done = PromoteZero(*range, slot);
+            if (done) counters.promotions.fetch_add(1, std::memory_order_relaxed);
+        } else if (state == SlotShared) {
+            done = PromoteShared(*range, slot);
+        }
+        return done;
+    };
+    bool ok = promote();
+    if (!ok) ok = WaitForBlock(promote);
     UnlockSlot(*range, slot, ok ? SlotOwn : state);
-    // A successful promotion resolves this fault. Clearing or reclaiming the same
-    // slot later can legitimately fault at the very same address again; those
-    // separate recoveries must not accumulate toward the stuck-fault limit.
-    // Leave the limit intact when an already writable slot makes no progress.
-    if (ok && state != SlotOwn) {
-        last = 0;
-        repeats = 0;
-    }
     if (!ok) {
         counters.failures.fetch_add(1, std::memory_order_relaxed);
+        Refused(address, 2, state);
         Note("EDEN_CRAM out of memory: a written slot of the guest's memory found no block\n");
+    } else if (state != SlotOwn) {
+        // The slot was made writable. A game that writes one place each time its slot was given
+        // back (cleared, freed or scanned) faults there again and again over a session, each time
+        // with something to do: counted as repeats, the 17th such write ended the game after
+        // 15 to 60 minutes (Swordpdf/ProsperoEden#246).
+        last = 0;
+        repeats = 0;
     }
     return ok;
 }
@@ -512,6 +608,22 @@ std::thread scanner;
 std::mutex scanner_mutex;
 std::condition_variable scanner_wake;
 bool scanner_stop = false;
+#ifdef PS5_NATIVE
+// The reserve kept full: every 100 ms, so a burst of writes that used it finds it whole again as
+// soon as the caches have given memory back (the scanner only passes every 20 s).
+std::thread keeper;
+
+void ReserveKeeper() {
+    std::unique_lock lock{scanner_mutex};
+    while (!scanner_stop) {
+        scanner_wake.wait_for(lock, std::chrono::milliseconds(100), [] { return scanner_stop; });
+        if (scanner_stop) break;
+        lock.unlock();
+        FillReserve();
+        lock.lock();
+    }
+}
+#endif
 
 std::uint64_t Mix(std::uint64_t hash, std::uint64_t word) noexcept {
     hash ^= word + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
@@ -683,7 +795,8 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
     const int length = std::snprintf(line, sizeof(line),
         "EDEN_CRAM %s held=%zuMiB own=%zu shared=%zu zero=%zu faults=%llu promotions=%llu copies=%llu waits=%llu "
         "returns_clear=%llu returns_free=%llu returns_scan=%llu dedup=%llu reserve_used=%llu failures=%llu "
-        "passes=%llu scan_ms=%llu fine=%zu fine_held=%zuMiB fined=%llu unfined=%llu fine_failures=%llu\n",
+        "passes=%llu scan_ms=%llu fine=%zu fine_held=%zuMiB fined=%llu unfined=%llu fine_failures=%llu "
+        "reserve=%zuMiB\n",
         when, guest_committed.load(std::memory_order_relaxed) >> 20, own, shared, slots - own - shared - fine,
         (unsigned long long)counters.faults.load(), (unsigned long long)counters.promotions.load(),
         (unsigned long long)counters.copies.load(), (unsigned long long)counters.waits.load(),
@@ -692,7 +805,8 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         (unsigned long long)counters.reserve_used.load(), (unsigned long long)counters.failures.load(),
         (unsigned long long)counters.passes.load(), (unsigned long long)(counters.scan_ns.load() / 1000000),
         fine, fine_kept * FinePage >> 20, (unsigned long long)counters.fined.load(),
-        (unsigned long long)counters.unfined.load(), (unsigned long long)counters.fine_failures.load());
+        (unsigned long long)counters.unfined.load(), (unsigned long long)counters.fine_failures.load(),
+        reserve_count.load(std::memory_order_relaxed) * (SparseSlot >> 20));
     if (length > 0) Report(line);
 }
 
@@ -733,9 +847,6 @@ void ScannerLoop(SparseRange* range) {
         if (scanner_stop) break;
         lock.unlock();
         if (scan_requested.load(std::memory_order_relaxed)) ScanPass(*range);
-#ifdef PS5_NATIVE
-        FillReserve();
-#endif
         if (std::chrono::steady_clock::now() >= next_report) {
             ServiceReport(*range, "now");
             next_report = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -859,6 +970,8 @@ bool ServiceAvailable() noexcept {
 
 // The guest range starts being a service (when the platform passed the check).
 void ServiceStart(SparseRange& range) noexcept {
+    // A refusal belongs to the session it ended: a later crash must not report it again.
+    refused_address.store(0, std::memory_order_relaxed);
     if (!service_requested.load(std::memory_order_relaxed) || !ServiceAvailable() || !AddStates(range)) {
         char line[96];
         const int length = std::snprintf(line, sizeof(line), "EDEN_CRAM off: %s\n",
@@ -869,7 +982,7 @@ void ServiceStart(SparseRange& range) noexcept {
     ResetCounters();
     range.promote = true;
 #ifdef PS5_NATIVE
-    FillReserve();
+    FillReserve(ReserveAtStart);
 #endif
     service_range.store(&range, std::memory_order_release);
     Eden::Fastmem::guest_write_fault.store(&HandleGuestWriteFault, std::memory_order_release);
@@ -878,6 +991,9 @@ void ServiceStart(SparseRange& range) noexcept {
         scanner_stop = false;
     }
     scanner = std::thread(ScannerLoop, &range);
+#ifdef PS5_NATIVE
+    keeper = std::thread(ReserveKeeper);
+#endif
     char line[128];
     const int length = std::snprintf(line, sizeof(line), "EDEN_CRAM on: scan=%d dedup=%d fine=%d reserve=%zuMiB\n",
                                      scan_requested.load() ? 1 : 0, dedup_requested.load() ? 1 : 0,
@@ -894,6 +1010,9 @@ void ServiceStop(SparseRange& range) noexcept {
     }
     scanner_wake.notify_all();
     if (scanner.joinable()) scanner.join();
+#ifdef PS5_NATIVE
+    if (keeper.joinable()) keeper.join();
+#endif
     ServiceReport(range, "end");
     MeasureFinePages(range);
     service_range.store(nullptr, std::memory_order_release);

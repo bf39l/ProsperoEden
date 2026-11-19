@@ -873,6 +873,7 @@ struct PerformanceSettings {
     bool compact_memory = false;     // the guest's memory in 16 KiB pages where it is mostly zeroes
     int memory_layout = 0;           // index into kMemoryLayoutKeys (0 is the Switch's own 4 GiB)
     int speed_limit = 0;             // index into kSpeedLimitKeys (0 is 100%, the console's own pace)
+    bool background_shader_cache = true; // appended: preserve existing aggregate initializer order
 };
 
 inline PerformanceSettings LoadPerformance(uint64_t title_id, const std::string& file = SettingsFile()) {
@@ -885,6 +886,7 @@ inline PerformanceSettings LoadPerformance(uint64_t title_id, const std::string&
         };
         value("block_list", result.block_list);
         value("async_shaders", result.async_shaders);
+        value("background_shader_cache", result.background_shader_cache);
         value("fast_gpu", result.fast_gpu);
         value("unsafe_cpu", result.unsafe_cpu);
         value("unsafe_dma", result.unsafe_dma);
@@ -914,6 +916,7 @@ inline bool SavePerformance(uint64_t title_id, const PerformanceSettings& value,
     auto& owner = title_id ? document["games"][Settings::TitleKey(title_id)] : document;
     if (!owner.is_object()) owner = Settings::Json::object();
     owner["performance"] = {{"block_list", value.block_list}, {"async_shaders", value.async_shaders},
+                            {"background_shader_cache", value.background_shader_cache},
                             {"fast_gpu", value.fast_gpu}, {"unsafe_cpu", value.unsafe_cpu},
                             {"unsafe_dma", value.unsafe_dma}, {"reactive_flushing", value.reactive_flushing},
                             {"skip_invalidation", value.skip_invalidation},
@@ -1048,6 +1051,16 @@ inline bool SaveCheatOff(uint64_t title_id, std::string_view key, bool off, cons
     if (keys.empty()) game.erase("cheats_off");
     else game["cheats_off"] = keys;
     return Settings::Write(document, file);
+}
+
+// Advanced, file-only workaround, deliberately per game: reducing the guest's tick rate helps
+// some dynamic frame-rate games but also slows games that pace themselves by that counter.
+// Keep it outside "performance", whose visible switches SavePerformance replaces as a group.
+inline bool LoadAdaptiveClock(uint64_t title_id, const std::string& file = SettingsFile()) {
+    if (!title_id) return false;
+    using Settings::Json;
+    return Settings::Bool(Settings::Load(file),
+                          Json::json_pointer("/games/" + Settings::TitleKey(title_id) + "/adaptive_clock"), false);
 }
 
 inline std::string LoadLastGame(const std::string& file = SettingsFile()) {
