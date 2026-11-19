@@ -204,6 +204,17 @@ inline bool ValidRomPath(std::string_view name) {
     return extension == ".nsp" || extension == ".xci";
 }
 
+// Keep the same relative path the Library uses. Taking just filename() loses a
+// game's folder and makes Home look for a different file directly under roms/.
+// A selection outside this root must not become a misleading basename entry.
+inline std::string RomHistoryPath(std::string_view selected, std::string_view roms) {
+    while (!roms.empty() && roms.back() == '/') roms.remove_suffix(1);
+    if (roms.empty() || selected.size() <= roms.size() ||
+        selected.substr(0, roms.size()) != roms || selected[roms.size()] != '/') return {};
+    const auto relative = selected.substr(roms.size() + 1);
+    return ValidRomPath(relative) ? std::string(relative) : std::string{};
+}
+
 // A wallpaper's file name: the name alone (the image lives in the wallpapers folder), readable
 // characters, at most 128 bytes. Empty means no wallpaper; "." and ".." are never a file.
 inline bool ValidWallpaperName(std::string_view name) {
