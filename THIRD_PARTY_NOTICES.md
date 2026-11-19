@@ -132,3 +132,21 @@ notices are retained; the integration adapts these changes to the newer Eden API
 
 The shader and GPU patches also modify Eden/Yuzu code credited above; the
 port rebases formatting calls for Eden d85bad89 without changing the engine pin.
+
+### Final Fantasy diagnostic adaptations
+
+The pipeline identity/thread activity tracing and bounded reactive-flush,
+unmapped-read PC and guest-fault diagnostics are adapted from
+[Oliv3rmoon/Nightshade](https://github.com/Oliv3rmoon/Nightshade), validation
+1.010.015 and [v1.012.002](https://github.com/Oliv3rmoon/Nightshade/releases/tag/v1.012.002),
+under GPL-3.0-or-later. The GPU submission stall report is by Oliv3rmoon in
+[Belladonna commit 318deb146daa](https://github.com/Oliv3rmoon/Belladonna/commit/318deb146daa968b2367918b952377d95093a72a),
+under the modified Mesa files’ MIT licence; its original patch and authorship are retained in
+`tools/radv-submission-dump.diff`. Thank you to Oliv3rmoon and contributors.
+These adaptations retain this fork's Eden master pin and existing fixes.
+
+The driver adaptations modify Mesa/PS5 winsys files with their original MIT
+notices (Mihawk; Red Hat; Bas Nieuwenhuizen; Intel and other Mesa contributors);
+Oliv3rmoon authored the stall diagnostic additions. The standalone Nightshade
+diagnostic fixtures and this repository's adaptation scripts retain their
+GPL-3.0-or-later notices.

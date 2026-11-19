@@ -59,12 +59,15 @@ with tempfile.TemporaryDirectory(prefix='eden-shader-start-') as work:
         graphics = (port / 'vk_graphics_pipeline_cost.cpp').read_text()
         compute = (port / 'vk_compute_pipeline_cost.cpp').read_text()
         wrapper = (port / 'vulkan_wrapper.cpp').read_text()
-        # Verify the actual shader-start integration. Nightshade's separate
-        # per-pipeline crash annotations (Crash::Doing) were not ported here.
+        # Verify shader-start integration and crash annotations in generated sources.
         for text, call in (
                 (compute, '            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);\n'),
                 (graphics, '    pipeline = device.GetLogical().CreateGraphicsPipeline({\n')):
             assert text.count(call) == 1 and '#include "shader_start.h"' in text, call
+            assert 'Eden::Crash::Doing eden_doing' in text
+            assert '#include "pipeline_identity.h"' in text
+        assert 'PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes)' in graphics
+        assert 'PipelineIdentity::Compute(*pipeline, shader_hash)' in compute
 
         def section(text, begin, end):
             start = text.index(begin)

@@ -1417,7 +1417,7 @@ texture_partial = [
 ]
 adapt('src/video_core/texture_cache/texture_cache.h',
       'vulkan-cache/video_core/texture_cache/texture_cache.h', [
-    ('namespace VideoCommon {', '#include "performance.h"\n#include "texture_partial.h"\n#include "image_pages.h"\n#include "astc_policy.h"\n#include "texture_evictions.h"\n#include "staging_chunks.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }\n\nnamespace VideoCommon {'),
+    ('namespace VideoCommon {', '#include "performance.h"\n#include "texture_partial.h"\n#include "image_pages.h"\n#include "astc_policy.h"\n#include "texture_evictions.h"\n#include "staging_chunks.h"\n#include "reactive_flush_log.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }\n\nnamespace VideoCommon {'),
     # A large image is laid out in the heap and staged in pieces of at most 64 MiB (headless/
     # staging_chunks.h): Tears of the Kingdom's texture array of 121 layers asked for a staging
     # buffer of 176 MiB each time it came back, and its v1.010.006 session ended on one.
@@ -1540,6 +1540,14 @@ adapt('src/video_core/texture_cache/texture_cache.h',
      '            ::Eden::ImagePages::Mark(cpu_addr, size);\n'
      '            auto map_id = slot_map_views.insert(gpu_addr, cpu_addr, size, image_id);'),
     (download_prefix, download_prefix + (port / 'vulkan_download_batch.inc').read_text() + '\n'),
+    # A copy for a guest read (reactive flushing) names each image of its area, after the batch
+    # above went in: its anchor is part of download_prefix (headless/reactive_flush_image.inc,
+    # Oliv3rmoon/Nightshade#1).
+    ('    ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {\n'
+     '        if (!IsDownloadable(image)) {\n',
+     '    ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {\n' +
+     (port / 'reactive_flush_image.inc').read_text() +
+     '        if (!IsDownloadable(image)) {\n'),
     (gc_original, gc),
     # RADV reports all Vulkan allocations, not just cached textures. A game's
     # measured ~1.9 GiB working set triggered dirty eviction at the old 1.6 GiB
@@ -1756,11 +1764,19 @@ configure_phases = [
      '    return configured;'),
 ]
 for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
+    # Once the pipeline exists, Eden's hashes beside its VkPipeline on stderr
+    # (headless/pipeline_identity.h): the driver's stall dump names the handle whose shader the
+    # GPU stopped in.
+    identity = ('::Eden::PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes);'
+                if name == 'vk_graphics_pipeline' else
+                '::Eden::PipelineIdentity::Compute(*pipeline, shader_hash);')
     anchors = [
-        ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n'
-                                 '#include "shader_start.h"'),
+        ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n#include "pipeline_identity.h"\n'
+                                 '#include "shader_start.h"\n#include "crash_report.h"'),
         ('            std::unique_lock lock{build_mutex};',
          '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
+        ('            pipeline_statistics->Collect(device, *pipeline);\n        }\n',
+         '            pipeline_statistics->Collect(device, *pipeline);\n        }\n        ' + identity + '\n'),
     ]
     # The shader cache's report (headless/shader_start.h): the descriptor set and pipeline layouts
     # and the update template, made before the pipeline itself.
@@ -1782,6 +1798,17 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
         ]
     if name == 'vk_graphics_pipeline':
         anchors += configure_phases
+    # While the driver compiles the pipeline, a crash report names it after the thread
+    # (headless/crash_report.h, Doing): a fault inside the driver leaves no other trace of the shader
+    # (Oliv3rmoon/Nightshade#4), and EDEN_PIPELINE is printed only once the pipeline exists.
+    if name == 'vk_graphics_pipeline':
+        anchors.append(('    pipeline = device.GetLogical().CreateGraphicsPipeline({\n',
+                        '    const ::Eden::Crash::Doing eden_doing{"the driver compiling graphics pipeline key", key.Hash()};\n'
+                        '    pipeline = device.GetLogical().CreateGraphicsPipeline({\n'))
+    else:
+        anchors.append(('            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);\n',
+                        '            const ::Eden::Crash::Doing eden_doing{"the driver compiling compute pipeline cs", shader_hash};\n'
+                        '            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);\n'))
     adapt(f'src/video_core/renderer_vulkan/{name}.cpp', name + '_cost.cpp', anchors)
 shader_costs = [
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include <set>\n#include <unordered_set>\n'

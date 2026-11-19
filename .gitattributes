@@ -2,3 +2,4 @@
 
 # Unified patch context includes a single space on empty source lines.
 tools/eden-patches/*.diff whitespace=-blank-at-eol,-blank-at-eof
+tools/radv-submission-dump.diff whitespace=-blank-at-eol,-blank-at-eof

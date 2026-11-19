@@ -197,6 +197,13 @@ int main(int argc, char** argv) {
         Eden::Crash::Fail("VK_ERROR_DEVICE_LOST");
     if (mode == "stalled")
         eden_gpu_stalled();
+    if (mode == "doing")  // the driver faults while it compiles a pipeline (tools/prepare-vulkan-port.py)
+        std::thread([] {
+            Eden::Crash::NameThread("VkPipelineBuilder");
+            { const Eden::Crash::Doing done{"finished work", 1}; }
+            const Eden::Crash::Doing building{"the driver compiling compute pipeline cs", 0x8228ff6df5537affull};
+            Outer(reinterpret_cast<volatile int*>(bad));
+        }).join();
     const auto crash = [] {
         Eden::Crash::NameThread("CPUCore_1");
         Outer(reinterpret_cast<volatile int*>(bad));
@@ -328,6 +335,14 @@ def check(binary, console):
     assert status == 42 and 'what: the app stopped itself\nreason: test exception: nothing caught it\n' in report, \
         (status, report[:400], err[-400:])
     assert '\nthread: Thrower (0x' in report and note.endswith(' 1\n')
+
+    # A fault while the thread says what it is doing (Doing): the report names it after the thread.
+    status, out, err, reports, note = run(binary, 'doing', console)
+    report = reports[0].read_text() if reports else ''
+    assert status == 42 and re.search(r'^thread: VkPipelineBuilder \(0x[0-9a-f]+\)\n'
+                                      r'doing: the driver compiling compute pipeline cs 8228ff6df5537aff\n'
+                                      r'running: ', report, re.M), (status, report[:600], err[-400:])
+    assert 'finished work' not in report
 
     # GPU loss closes after writing the report. Cover an uncaught Vulkan
     # exception, an explicit worker failure callback, and a fault after a driver stall.

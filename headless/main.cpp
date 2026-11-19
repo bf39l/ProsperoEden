@@ -13,6 +13,7 @@
 #include "shader_start.h"
 #include "ipc_ring.h"
 #include "unmapped_log.h"
+#include "reactive_flush_log.h"
 #include "guest_fault.h"
 #include "jit_list.h"
 #include "boot_trace.h"
@@ -800,6 +801,7 @@ int main(int argc, char** argv) {
             Common::Log::SetGlobalFilter(filter);
         }
         Common::Log::Start();
+        Eden::Crash::SetLogFlush([] { Common::Log::Stop(); });
         SCOPE_EXIT { Common::Log::Stop(); };
 #ifdef PS5_NATIVE
         {
@@ -1284,6 +1286,7 @@ int main(int argc, char** argv) {
             Eden::GuestClock::Reset(adaptive_clock);
             Eden::IpcRing::Reset();
             Eden::UnmappedLog::Reset();
+            Eden::ReactiveFlushLog::Reset();
             Eden::ShaderStart::background = speed.background_shader_cache && backend == Eden::GraphicsBackend::Vulkan;
             Eden::ShaderStart::SetProgress({});
             Eden::Report("launch", adaptive_clock ? "Guest clock: adaptive workaround" : "Guest clock: normal");

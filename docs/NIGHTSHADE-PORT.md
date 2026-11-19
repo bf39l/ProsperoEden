@@ -116,7 +116,7 @@ app identity, executable bytes and both project credits were verified.
 
 Outputs: `build/release/PPSA99018`, `dist/ProsperoEden-v1.000.001.zip`, and
 `build/symbols/ProsperoEden-v1.000.001.elf` (retain for crash symbolization).
-ZIP SHA-256: `32e9e990044e209dc2a2ee883b4ab00d96705dbf9767801a3364bf5cbbea8375`.
+ZIP SHA-256: `99a7120b2b051a268dee0d727cca387ba5eb6de4927b345a56f22c1fef7947b0`.
 
 Supported focused regressions passed for the new engine behavior and retained
 settings/history, NSO loading, audio/cheat shutdown, failed-load/content teardown,
@@ -189,3 +189,39 @@ For a title needing the old clock workaround, set `adaptive_clock: true` under
 its `games/<title-id>` JSON entry. Normal timing is the default. To compare
 foreground shader loading, set `background_shader_cache: false` in that title's
 `performance` object (or the global performance object); there is no new UI switch.
+
+## Final Fantasy diagnostic follow-up
+
+Ported Nightshade's validation 1.010.015 pipeline identity/thread activity trace
+and v1.012.002 reactive-flush/guest-fault diagnostics, with Oliv3rmoon/Belladonna
+318deb146daa's GPU stall report. Eden remains pinned to d85bad89, verified against
+Eden master on 2026-11-19. Neither the engine nor the driver revision is downgraded.
+
+- `EDEN_PIPELINE`: Vulkan handle, pipeline key and stage hashes after creation.
+  A crash during compilation names its key/hash on the crash report's `doing:` line.
+- `radv/ps5 stall`: after the existing ten-second driver timeout, the submission,
+  waits, first unmet wait, preceding draws/dispatches and matching shader code.
+  It marks the GPU stalled before inspecting it, preserving close-on-device-loss.
+- `EDEN_REACTIVE_FLUSH`: first 64 GPU-to-guest copies, then powers of two per game,
+  with read address, copied range and up to 32 before/after bytes within a page.
+  The first 16 also reach stderr; image lines describe already-requested downloads.
+  Logging adds no new GPU download or synchronization operation.
+- `EDEN_UNMAPPED_READ`: first 32 A64 callback reads with PC/LR/SP, first four also
+  in stderr; `EDEN_GUEST_FAULT` adds thread and up to 16 return addresses.
+  Existing guest-fault handling remains in control.
+- The independent crash flusher also attempts to drain Eden's log after stderr
+  and stdout; it cannot delay the separate process exit/restart helper.
+
+Reproduce the same FF scene with Vulkan. Preserve `/data/prosperoeden/logs/`
+(including stderr and crash sidecars) and `/data/prosperoeden/user/log/eden_log.txt`.
+These diagnostics identify the remaining failure; they do not establish a fix
+for FF or prove that stale GPU data is its cause. Existing ATOM.CAS/ATOMS.CAS,
+coherence and cache-operation shader fixes remain applied.
+
+Final FF diagnostic Docker validation: the PS5 app and patched RADV built and
+packaged successfully; ZIP integrity and packaged executable match verified.
+The driver test checked the actual patched source, PM4/register definitions and
+call sites, not only a copied fixture. Reactive flush bounds/reset, shader-cache
+concurrency, crash pipeline identity/device-loss behavior and safe Home scanning
+checks passed. On this ARM/Rosetta container, supported ASan/UBSan checks were
+used; native x86 ThreadSanitizer remains for CI. FF gameplay is not yet verified.

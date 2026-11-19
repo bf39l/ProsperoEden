@@ -283,6 +283,13 @@ const char* ThreadName(std::uintptr_t thread) noexcept {
     return "not named";
 }
 
+// The thread's entry, for what it said it was doing (Doing, crash_report.h).
+const NamedThread* ThreadEntry(std::uintptr_t thread) noexcept {
+    for (const NamedThread& entry : named_threads)
+        if (entry.thread.load(std::memory_order_acquire) == thread) return &entry;
+    return nullptr;
+}
+
 void PutRegister(const char* before, const char* name, std::uint64_t value) noexcept {
     report.Put(before);
     report.Put(name);
@@ -347,7 +354,16 @@ void Compose(const Kind* kind, int code, std::uint64_t address, const Registers&
     t.Put(ThreadName(self));
     t.Put(" (0x");
     t.Hex(self);
-    t.Put(")\nrunning: ");
+    t.Put(")\n");
+    const NamedThread* entry = ThreadEntry(self);
+    if (const char* what = entry ? entry->doing.load(std::memory_order_acquire) : nullptr) {
+        t.Put("doing: ");
+        t.Put(what);
+        t.Put(' ');
+        t.Hex(entry->doing_value.load(std::memory_order_relaxed), 16);
+        t.Put('\n');
+    }
+    t.Put("running: ");
     t.Put(sessions[session_now.load(std::memory_order_acquire) & 1]);
     t.Put('\n');
 #ifdef PS5_NATIVE
@@ -548,10 +564,13 @@ void Restarter() {
 
 // The buffered log stream: flushing it can wait forever on a lock the crashed thread holds,
 // which is why the thread above does not do it.
+std::atomic<void (*)()> log_flush{nullptr};
+
 void Flusher() {
     WaitForReport();
     std::fflush(stderr);
     std::fflush(stdout);
+    if (void (*const flush)() = log_flush.load(std::memory_order_acquire)) flush();
 }
 
 void CopyText(char* target, std::size_t size, const char* text) noexcept {
@@ -561,6 +580,10 @@ void CopyText(char* target, std::size_t size, const char* text) noexcept {
 }
 
 } // namespace
+
+void SetLogFlush(void (*flush)()) noexcept {
+    log_flush.store(flush, std::memory_order_release);
+}
 
 bool Readable(const void* address, std::size_t bytes) noexcept {
     char buffer[4096];
