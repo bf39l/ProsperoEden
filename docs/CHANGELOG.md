@@ -2,6 +2,26 @@
 
 What changed in each release of ProsperoEden, newest first. A release's notes on GitHub are its section here.
 
+## v1.000.000
+
+First release under the `1.000.000` version series, based on the latest merged main.
+
+### Changed
+
+- **App name:** restored to **ProsperoEden**. The title ID remains `PPSA99018`.
+- **Version:** GitHub tag `v1.000.000`, PS5 package version `01.000.000`. Earlier `v26.011.018` history is retained.
+- **Release preparation:** a manual workflow opens a version PR; merging a package-version change into main creates its tag and starts the release build automatically.
+
+### Included fixes
+
+- Recently played and Continue retain ROM subfolder paths and skip removed or inaccessible games.
+- Successful guest-memory recovery resets the repeated-fault limit, avoiding false rejection of later writes to reclaimed pages.
+- RADV receives the verified zlib archive on cold and cached builds; optional compiler-cache downloads have bounded time limits.
+
+### Engine
+
+Eden remains pinned to `d85bad89248fcae68f812d7e1c937436261404cb`, the latest upstream `master` commit checked on 19 November 2026.
+
 ## v26.011.018
 
 This release moves to Eden's current master and its newer toolchain, and installs under a new title ID so it does not replace another ProsperoEden build.

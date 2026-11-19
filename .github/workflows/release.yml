@@ -130,6 +130,7 @@ jobs:
       - name: Fetch dependencies
         run: |
           python3 -B tools/check-dependency-seeds.py
+          python3 -B tools/check-release-version.py
           make deps
 
       # After `make deps`: a restored RADV folder would otherwise stand in for the git checkout
