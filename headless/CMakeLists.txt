@@ -1062,10 +1062,10 @@ string(REPLACE "${is_interrupted_old}"
     "bool PhysicalCore::IsInterrupted() const {\n    return __atomic_load_n(&m_is_interrupted, __ATOMIC_ACQUIRE);\n}"
     physical_core_source "${physical_core_source}")
 string(REPLACE "${prefetch_old}"
-    "            } else {\n                interface->LogBacktrace(process);\n                if (prefetch_abort) {\n                    const std::string eden_name = Core::GetThreadName(thread).value_or(\"?\");\n                    ::Eden::RecordGuestFault(\"guest thread \" + eden_name + \" jumped to an unmapped address\");\n                    // stderr.log, which most reports include, gets where and from where (guest_fault.h).\n                    Kernel::Svc::ThreadContext eden_context{};\n                    interface->GetContext(eden_context);\n                    std::vector<u64> eden_calls;\n                    for (const auto& entry : Core::GetBacktraceFromContext(process, eden_context))\n                        eden_calls.push_back(entry.original_address);\n                    std::fprintf(stderr, \"%s\\n\", ::Eden::FaultLine(eden_name, thread->GetThreadId(), eden_context.pc,\n                                                                    eden_context.lr, eden_context.sp, eden_calls).c_str());\n                }\n            }\n            thread->RequestSuspend(kernel, SuspendType::Debug);"
+    "            } else {\n                interface->LogBacktrace(process);\n                if (prefetch_abort) {\n                    const std::string eden_name = Core::GetThreadName(thread).value_or(\"?\");\n                    // stderr.log, which most reports include, gets where and from where (guest_fault.h).\n                    Kernel::Svc::ThreadContext eden_context{};\n                    interface->GetContext(eden_context);\n                    auto& eden_memory = process->GetMemory();\n                    ::Eden::FaultCallSite(eden_context.lr,\n                        [&](u64 address, u64 size) { return eden_memory.IsValidVirtualAddressRange(address, size); },\n                        [&](u64 address) { return eden_memory.Read32(address); },\n                        [](const char* line) { std::fprintf(stderr, \"%s\\n\", line); });\n                    std::vector<u64> eden_calls;\n                    for (const auto& entry : Core::GetBacktraceFromContext(process, eden_context))\n                        eden_calls.push_back(entry.original_address);\n                    std::fprintf(stderr, \"%s\\n\", ::Eden::FaultLine(eden_name, thread->GetThreadId(), eden_context.pc,\n                                                                    eden_context.lr, eden_context.sp, eden_calls).c_str());\n                    ::Eden::RecordGuestFault(\"guest thread \" + eden_name + \" jumped to an unmapped address\");\n                }\n            }\n            thread->RequestSuspend(kernel, SuspendType::Debug);"
     physical_core_source "${physical_core_source}")
 write_derived("${PORT_BUILD_DIR}/physical_core.cpp"
-    "#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/arm/debug.h\"\n${physical_core_source}")
+    "#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/arm/debug.h\"\n#include \"core/memory.h\"\n${physical_core_source}")
 # The guest's tick counter gives when a frame is a little late (headless/guest_clock.h): its
 # rate is applied where Eden applies its own clock settings, and it follows the frames the
 # game hands in (BufferQueueProducer::QueueBuffer, below).
@@ -1307,7 +1307,16 @@ if(break_at LESS 0)
     message(FATAL_ERROR "Pinned svcBreak changed; review where the last service calls are printed.")
 endif()
 string(REPLACE "${break_site}" "${break_site}    if (!notification_only && system.IsShuttingDown()) {\n        LOG_CRITICAL(Debug_Emulated, \"EDEN_BREAK_DURING_STOP the session was already stopping: services write no reply \"\n                                     \"then, so a call that waited for one reads its own request (2010-0212)\");\n    }\n    if (!notification_only) {\n        ::Eden::IpcRing::Dump(GetCurrentThread(system.Kernel()).GetThreadId(),\n                              [](const char* line) { LOG_CRITICAL(Debug_Emulated, \"{}\", line); });\n    }\n" break_source "${break_source}")
-write_derived("${PORT_BUILD_DIR}/svc_exception.cpp" "#include \"${EDEN_PORT_DIR}/ipc_ring.h\"\n${break_source}")
+# Publish only after the engine has captured the report and backtrace. Notification
+# breaks and an attached debugger retain their existing behavior; shutdown breaks
+# must not overwrite the original failure or turn a manual stop into a panic.
+set(panic_site "    const bool should_break = !notification_only;")
+string(FIND "${break_source}" "${panic_site}" panic_at)
+if(panic_at LESS 0)
+    message(FATAL_ERROR "Pinned svcBreak completion changed")
+endif()
+string(REPLACE "${panic_site}" "    if (!notification_only && !system.IsShuttingDown() && !system.DebuggerEnabled() &&\n        (break_reason == BreakReason::Panic || break_reason == BreakReason::Assert ||\n         break_reason == BreakReason::CppException)) {\n        ::Eden::RecordGuestPanic(static_cast<u32>(break_reason),\n                               GetCurrentThread(system.Kernel()).GetThreadId());\n    }\n${panic_site}" break_source "${break_source}")
+write_derived("${PORT_BUILD_DIR}/svc_exception.cpp" "#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/ipc_ring.h\"\n${break_source}")
 list(REMOVE_ITEM core_sources "hle/kernel/svc/svc_exception.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/svc_exception.cpp")
 file(READ "${PROJECT_SOURCE_DIR}/src/core/memory.cpp" arena_source)
@@ -2981,14 +2990,23 @@ string(REPLACE "${flush_caching_old}" [=[void MemoryManager::FlushCaching() {
         }
     }
 ]=] gpu_memory_source "${gpu_memory_source}")
+if(PS5_NATIVE)
+    set(draw_flush_old "            rasterizer->FlushRegion(dev_addr_base, copy_amount, which);")
+    string(FIND "${gpu_memory_source}" "${draw_flush_old}" draw_flush_at)
+    if(draw_flush_at LESS 0)
+        message(FATAL_ERROR "Pinned indirect draw readback observation changed")
+    endif()
+    string(REPLACE "${draw_flush_old}" "${draw_flush_old}\n            ::Eden::IndirectDrawLog::Flushed(dev_addr_base, copy_amount);" gpu_memory_source "${gpu_memory_source}")
+    string(PREPEND gpu_memory_source "#include \"${EDEN_PORT_DIR}/indirect_draw_log.h\"\n")
+endif()
 write_derived("${PORT_BUILD_DIR}/memory_manager.cpp"
     "#include <atomic>\n#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/core.h\"\n#include \"core/gpu_dirty_memory_manager.h\"\n${gpu_memory_source}")
 list(REMOVE_ITEM video_sources memory_manager.cpp)
 list(APPEND video_sources "${PORT_BUILD_DIR}/memory_manager.cpp")
+file(READ "${PROJECT_SOURCE_DIR}/src/video_core/engines/maxwell_3d.cpp" maxwell_source)
 if(EDEN_DEV_PROFILE)
     # Render-enable evaluations per mode and result (EDEN_DEV_GUEST cond=), to tell GPU
     # render conditions apart from the game's own LOD choices (LOD swaps).
-    file(READ "${PROJECT_SOURCE_DIR}/src/video_core/engines/maxwell_3d.cpp" maxwell_source)
     set(condition_accelerated "    if (rasterizer->AccelerateConditionalRendering()) {\n        execute_on = true;\n        return;\n    }")
     set(condition_end "    }\n    }\n}\n\nvoid Maxwell3D::ProcessCounterReset() {")
     foreach(anchor IN ITEMS condition_accelerated condition_end)
@@ -3003,6 +3021,11 @@ if(EDEN_DEV_PROFILE)
     string(REPLACE "${condition_end}"
         "    }\n    }\n    ::Eden::Performance::CountCondition(\n        regs.render_enable_override == Regs::RenderEnable::Override::AlwaysRender ? 1u :\n        regs.render_enable_override == Regs::RenderEnable::Override::NeverRender ? 2u :\n        3u + static_cast<unsigned>(regs.render_enable.mode) * 2u + (execute_on ? 1u : 0u));\n}\n\nvoid Maxwell3D::ProcessCounterReset() {"
         maxwell_source "${maxwell_source}")
+endif()
+if(PS5_NATIVE)
+    include("${EDEN_PORT_DIR}/indirect_draw_trace.cmake")
+endif()
+if(PS5_NATIVE OR EDEN_DEV_PROFILE)
     write_derived("${PORT_BUILD_DIR}/maxwell_3d.cpp" "#include \"${EDEN_PORT_DIR}/performance.h\"\n${maxwell_source}")
     list(REMOVE_ITEM video_sources engines/maxwell_3d.cpp)
     list(APPEND video_sources "${PORT_BUILD_DIR}/maxwell_3d.cpp")

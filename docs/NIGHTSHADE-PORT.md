@@ -116,7 +116,7 @@ app identity, executable bytes and both project credits were verified.
 
 Outputs: `build/release/PPSA99018`, `dist/ProsperoEden-v1.000.001.zip`, and
 `build/symbols/ProsperoEden-v1.000.001.elf` (retain for crash symbolization).
-ZIP SHA-256: `99a7120b2b051a268dee0d727cca387ba5eb6de4927b345a56f22c1fef7947b0`.
+ZIP SHA-256: `59162fefa515a154940673b77ed9b410b1c8d0a6cc727d48808ae5a36016b171`.
 
 Supported focused regressions passed for the new engine behavior and retained
 settings/history, NSO loading, audio/cheat shutdown, failed-load/content teardown,
@@ -225,3 +225,211 @@ call sites, not only a copied fixture. Reactive flush bounds/reset, shader-cache
 concurrency, crash pipeline identity/device-loss behavior and safe Home scanning
 checks passed. On this ARM/Rosetta container, supported ASan/UBSan checks were
 used; native x86 ThreadSanitizer remains for CI. FF gameplay is not yet verified.
+
+### Quieter detailed logging
+
+Detailed logging now starts at Info and enables Debug only for Render,
+Render.Vulkan, HW.GPU, Shader and Core.ARM. Service polling and filesystem
+Debug traffic no longer fill the engine log while graphics diagnostics are
+being collected. Warning/error messages and the separate bounded stderr GPU
+diagnostics remain enabled. An explicit development log_filter still overrides
+this profile. Docker release build and package validation passed.
+
+## Indirect draw argument provenance (new diagnostic branch)
+
+`debug/ff-indirect-draw-provenance` adds `EDEN_DRAW_ARGS` and `EDEN_DRAW_SOURCE`
+to stderr, independently of the Detailed logs setting. The current Eden master
+pin, refresh policy, draw rejection threshold and accepted draw calls are retained.
+No full PS5 build was run for this addition: the user will build it. Focused
+ASan/UBSan checks and generation against the actual patched Eden sources pass.
+
+The CPU fallback paths for arrays/indexed/multi-indexed indirect macros record:
+
+- Macro method, sequence, host monotonic observation timestamp, raw words, instance
+  mask, count/instances before the existing refresh and after it or a forced retry.
+- The exact macro segment source: inline command or GPU virtual address; mapped
+  device/CPU address and GPU-cache dirty state for sampled suspicious arguments.
+- Existing refresh-read and completed FlushRegion callback counts. A completed
+  callback may be a no-op; it does not prove a GPU download or a hardware fence.
+- Recent matching Vulkan buffer write-tracking marks from a 128-entry thread-local
+  history: range and needs_sync flag. These show producer intent, not completion.
+  A missing entry means unknown/evicted, not proof that the GPU never wrote it.
+- The existing rejection outcome. The last eight CPU draw observations are
+  printed with the first suspicious draw for context.
+
+Diagnostic suspicion starts at one million instances or 2^26 count*instances;
+this ONLY selects logging. The existing guard is unchanged. The first 32 accepted and first 32 rejected suspect
+draws, then powers of two in each category, are logged; state resets per game session.
+Ordinary draws do not add cache-ownership queries. No new GPU reads, waits,
+refreshes, readbacks or draw rejection are introduced.
+
+`queued_checked` and `refresh_observed` qualify the cache flags: zero means the
+state was not sampled, not that the range was clean. An argument that first
+becomes suspicious after refresh has value snapshots but can lack pre-refresh
+ownership samples. Multi-draw per-record baselines follow that macro's initial
+batch refresh (`baseline=after-multi-refresh`); an existing forced retry is
+recorded separately. The GPU-native indirect path is not decoded by this CPU
+trace; the existing driver stall report still captures GPU work.
+
+Interpretation: bad queued values replaced by sane refreshed values suggest a
+stale command-list snapshot; bad values surviving a refresh, missing dirty
+tracking despite a recent write mark, or suspicious values appearing after a
+refresh point to different producers/coherency paths for investigation. These
+observations narrow the next check; none alone proves a synchronization defect
+or identifies the exact guest instruction that wrote the counter.
+
+Focused check (inside the running container):
+
+```bash
+python3 -B tools/check-indirect-draw-log.py "$(cat .local/headless-cache)/source"
+```
+
+The 212533 console test exposed two observation issues, corrected locally: use
+the exact one-argument `GpuToCpuAddress(address)` rather than the range-search
+overload, and keep separate accepted/rejected sampling budgets. The latter
+prevents repetitive rejected draws from hiding an accepted dangerous draw.
+Regression checks cover exact offsets and accepted samples after rejected-budget
+exhaustion. Full rebuilding of these corrections is left to the user.
+
+## Counter producer tracing and PS5 draw containment
+
+The corrected 213328 console trace matched a 27,232,513-instance CPU draw to the
+stalled GPU submission. Its argument range was recently marked for GPU writing,
+but the cache reported clean and skipped normal refresh. Existing forced refresh
+also left the same value on sampled larger rejected draws.
+
+`EDEN_DRAW_PRODUCER` now associates each matched write mark with the active
+graphics pipeline key and six stage hashes, or compute shader hash, plus a work
+sequence and logical storage/image-buffer binding slot. The printed byte offset
+locates the argument within that writable range. Identity scopes wrap pipeline
+configuration on the GPU emulation thread, not asynchronous shader compilation.
+`intent_only=1` is deliberate: a writable binding may not execute a store, so
+this identifies candidate producer shaders, not an observed hardware write.
+Unknown/out-of-history producers remain unknown.
+
+The PS5 CPU-decoded indirect draw guard additionally rejects nonzero draws above
+1,048,576 instances, after the existing forced-refresh and recheck. This closes
+the product-only gap for six-index draws with 27–31 million instances. It leaves
+the original product limit and ordinary/zero-count behavior intact. This is
+containment; corrupt counters could still cause missing geometry or another game
+failure. It does not establish or repair the root producer/coherency defect.
+
+Focused checks exercise the actual generated guard and retry flow, recorded
+crash values, normal/boundary/zero cases, producer identity and Vulkan/CMake
+anchors. The user performs the full Docker build and console test.
+
+## Upstream counter-source probe
+
+The 411-second 215111 test still loses the device through native GPU indirect
+draws (192 x 1,000,593,163), bypassing the CPU fallback guard. That guard is not
+a complete compatibility fix. The cached 824-byte compute producer contains
+input texture fetches, a counter surface load, and five argument-buffer stores.
+The original counter may therefore come from another producer.
+
+When suspicious draws first identify a compute producer, `EDEN_COUNTER_WATCH`
+arms bounded descriptor snapshots on subsequent configurations of that program.
+`EDEN_COUNTER_BINDING` logs input/output image and texture buffer handles,
+constant-buffer offsets, element counts, access flags, shader scalar/format,
+runtime view/bound formats, sizes and GPU/CPU addresses.
+`EDEN_COUNTER_UPSTREAM` names the most recent overlapping buffer-write intent
+before the current program's output bindings are marked. This can identify the
+next shader in the counter's producer chain. An overlap alone does not prove
+which store executed. Unknown or evicted writers remain explicit.
+
+The probe selects its shader from the observed bad argument history rather than
+a game-specific hash. It captures the first four configurations and powers of
+two thereafter. No shader semantics, GPU waits or readbacks are added by this
+probe. Focused tests pass; the user runs the full build. For the next capture,
+play until the character artifacts occur and then collect stderr; deliberately
+waiting for another crash is unnecessary if the source-probe lines are present.
+
+## Integer sampled texel-buffer candidate correction
+
+The 221934 run confirms reactive flushing OFF, but still crashes on GPU-native
+indirect draws with billion-instance arguments. The earlier live source probe
+shows PixelFormat 58 (`R32_UINT`) on sampled counter/argument buffers while the
+shader backend declares every sampled buffer as float.
+
+This fork's patch `24-vulkan-integer-texel-buffers.diff` adds an explicit Vulkan
+opt-in, integer format metadata on sampled-buffer descriptors, per-descriptor
+SPIR-V scalar/image types, and integer fetch selection with bitcasts into the
+existing IR carrier. Float buffers and non-opt-in hosts retain their old path.
+OpenGL does not opt in. This is a correction to an observed type mismatch;
+console testing is still needed to establish whether it fixes FF's bad counters.
+
+The PS5 Vulkan internal cache version changes from 19 to `0x50530014`, because
+old serialized environments did not cache the sampled-buffer pixel formats.
+The next build will rebuild incompatible Vulkan shader/pipeline caches
+automatically; saves, keys, firmware, OpenGL caches and the pinned Eden commit
+are unaffected. The app version remains 1.000.001.
+
+`tools/check-integer-texel-buffers.py` applies the complete patch stack to the
+verified pinned archive and exercises production declaration/selection code
+under ASan/UBSan: mixed float/uint buffers, correct image load types, integer
+bit preservation, default-host behavior, existing array refusal and cache
+migration. Indexed storage-image regression checks also pass. The user runs
+the full Docker build. For the next controlled FF test, keep reactive flushing
+off initially and confirm sampled `EDEN_COUNTER_BINDING` lines now report
+`shader_scalar=uint` for the R32_UINT buffers if the watch is armed.
+
+## Guest panic recovery and failed-call evidence
+
+The integer-buffer console retest still has intermittent visual artifacts and a
+later guest GameThread jump to `0x4`, preceded by RenderThread near-null reads.
+No Vulkan device loss accompanies that capture. The invalid pointer's origin
+remains unresolved; the draw guard and integer-buffer change are not a complete
+FF compatibility fix.
+
+Fatal non-notification guest Panic, Assert and CppException now publish a session
+failure after the report/backtrace has been captured. With no debugger attached,
+the frontend stops the game and returns to the launcher instead of leaving an
+otherwise live session with audio and a frozen picture. Shutdown breaks and
+notification breaks retain their behavior. Panics are excluded from early guest
+jump retries. This recovers the failed session; it does not repair guest state.
+
+Unmapped jumps also emit eight bounded `EDEN_GUEST_CALL_SITE` instruction words
+around LR to stderr, validating each word before reading and before notifying
+the frontend. `tools/check-guest-panic.py` tests the actual generated panic hook,
+nonfatal/shutdown/debugger exclusions, first-fault retention, concurrent recording,
+retry policy and bounded instruction reads under ASan/UBSan. Both changed engine
+fault handlers compile using the actual PS5 target flags. The full application
+build and console test remain the developer's next step.
+
+## Guard the native indirect path for FF Resonance
+
+The 2026-11-19 23:16:27 device-loss capture contains a native GPU indirect draw
+with 192 indices and 2,147,484,943 instances. That path never entered the existing
+CPU argument guard. For PS5 title `0100B8A026F14000`, the arrays, indexed and
+counted multi-indexed indirect macros now enter their existing CPU fallback
+before setting native indirect state. The fallback refreshes GPU-written macro
+parameters, retries suspicious values through the existing forced refresh, and
+issues direct draws only for validated values. Persistent implausible values
+are dropped; zero-work draws retain their no-op behavior. Byte-count transform
+feedback is unchanged; it is not the instanced indirect path in this capture.
+
+`headless/indirect_draw_policy.h` scopes this compatibility workaround to that
+PS5 title. Other titles and non-PS5 hosts keep their original native path. A
+bounded, once-per-macro `EDEN_INDIRECT_VALIDATION ... mode=refreshed-cpu-fallback`
+line confirms routing on the console. Existing `EDEN_DRAW_ARGS` and producer
+probes capture the queued, refreshed and retried arguments on this path.
+
+This closes the observed validation bypass; it does not establish who corrupted
+the counters, fix the separate guest CPU fault, or restore geometry discarded
+for invalid counts. Extra GPU readbacks may lower FF performance. Console
+retesting is required to assess stability and visual artifacts.
+
+`tools/check-native-indirect-guard.py` runs the actual generated routing and
+fallback guard code with ASan/UBSan, including the recorded 2,147,484,943-instance
+case, repair on refresh, normal and zero-work values, mixed multi-draw lists,
+and other-title/non-PS5 exclusions. Existing draw provenance regressions pass.
+The generated macro translation unit is checked with the actual PS5 compiler;
+the developer runs the full application build.
+
+## Console checkpoint (2026-11-19)
+
+The developer reports FF Resonance remains playable with the validated indirect
+fallback, but flicker and black lines persist. This is a working checkpoint,
+not a complete compatibility fix. Keep it on the development branch pending
+further testing; the guest object fault and the origin of corrupt draw counts
+remain unresolved. Private console logs and offline game analysis are retained
+locally under ignored `debug/` and are not part of this change.

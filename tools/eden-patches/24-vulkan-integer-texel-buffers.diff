@@ -1,0 +1,106 @@
+--- a/src/shader_recompiler/host_translate_info.h
++++ b/src/shader_recompiler/host_translate_info.h
+@@ -28,6 +28,8 @@
+     u32 max_descriptor_set_sampled_images{};
+     u32 max_descriptor_set_storage_images{};
+     u32 max_descriptor_set_input_attachements{};
++    // Opt-in: a Vulkan texel buffer uses the scalar type of its integer format.
++    bool support_integer_texture_buffers{};
+     bool support_float64{};      ///< True when the device supports 64-bit floats
+     bool support_float16{};      ///< True when the device supports 16-bit floats
+     bool support_int64{};        ///< True when the device supports 64-bit integers
+--- a/src/shader_recompiler/shader_info.h
++++ b/src/shader_recompiler/shader_info.h
+@@ -193,6 +193,8 @@
+     u32 mask = 0xffffffff;
+     u32 secondary_mask = 0xffffffff;
+ 
++    bool is_integer = false;
++
+     auto operator<=>(const TextureBufferDescriptor&) const = default;
+ };
+ using TextureBufferDescriptors = boost::container::small_vector<TextureBufferDescriptor, 6>;
+--- a/src/shader_recompiler/ir_opt/texture_pass.cpp
++++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
+@@ -1029,6 +1029,8 @@
+                     .size_shift = size_shift,
+                     .mask = cbuf.mask,
+                     .secondary_mask = cbuf.secondary_mask,
++                    .is_integer = host_info.support_integer_texture_buffers &&
++                                  is_texture_pixel_format_integer(cbuf),
+                 });
+             } else {
+                 // A uniform index is resolved when drawing, so a single descriptor is enough
+--- a/src/shader_recompiler/backend/spirv/spirv_emit_context.h
++++ b/src/shader_recompiler/backend/spirv/spirv_emit_context.h
+@@ -48,6 +48,9 @@
+ struct TextureBufferDefinition {
+     Id id;
+     u32 count;
++    Id image_type;
++    Id pointer_type;
++    bool is_integer;
+ };
+ 
+ struct ImageBufferDefinition {
+--- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
++++ b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
+@@ -1353,14 +1353,15 @@
+         return;
+     }
+     const spv::ImageFormat format{spv::ImageFormat::Unknown};
+-    image_buffer_type = TypeImage(F32[1], spv::Dim::Buffer, 0U, false, false, 1, format);
+-
+-    const Id type{TypePointer(spv::StorageClass::UniformConstant, image_buffer_type)};
+     texture_buffers.reserve(info.texture_buffer_descriptors.size());
+     for (const TextureBufferDescriptor& desc : info.texture_buffer_descriptors) {
+         if (desc.count != 1) {
+             throw NotImplementedException("Array of texture buffers");
+         }
++        // Integer counter/argument buffers must remain integer through the fetch.
++        const Id image_type{TypeImage(desc.is_integer ? U32[1] : F32[1],
++                                      spv::Dim::Buffer, 0U, false, false, 1, format)};
++        const Id type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
+         const Id id{AddGlobalVariable(type, spv::StorageClass::UniformConstant)};
+         Decorate(id, spv::Decoration::Binding, binding);
+         Decorate(id, spv::Decoration::DescriptorSet, 0U);
+@@ -1368,6 +1369,9 @@
+         texture_buffers.push_back({
+             .id = id,
+             .count = desc.count,
++            .image_type = image_type,
++            .pointer_type = type,
++            .is_integer = desc.is_integer,
+         });
+         if (profile.supported_spirv >= 0x00010400) {
+             interfaces.push_back(id);
+--- a/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp
++++ b/src/shader_recompiler/backend/spirv/emit_spirv_image.cpp
+@@ -262,15 +262,15 @@
+             const Id idx{index.IsImmediate() ? ctx.Const(index.U32()) : ctx.Def(index)};
+             const bool non_uniform{
+                 MarkNonUniform(ctx, idx, index, NonUniformKind::UniformTexelBuffer)};
+-            const Id ptr{ctx.OpAccessChain(ctx.image_buffer_type, def.id, idx)};
+-            const Id object{ctx.OpLoad(ctx.image_buffer_type, ptr)};
++            const Id ptr{ctx.OpAccessChain(def.pointer_type, def.id, idx)};
++            const Id object{ctx.OpLoad(def.image_type, ptr)};
+             if (non_uniform) {
+                 DecorateNonUniform(ctx, ptr);
+                 DecorateNonUniform(ctx, object);
+             }
+             return object;
+         }
+-        return ctx.OpLoad(ctx.image_buffer_type, def.id);
++        return ctx.OpLoad(def.image_type, def.id);
+     } else {
+         const TextureDefinition& def{ctx.textures.at(info.descriptor_index)};
+         if (def.count > 1) {
+@@ -332,7 +332,7 @@
+ 
+ bool IsTextureInteger(EmitContext& ctx, const IR::TextureInstInfo& info) {
+     if (info.type == TextureType::Buffer) {
+-        return false;
++        return ctx.texture_buffers.at(info.descriptor_index).is_integer;
+     }
+     return ctx.textures.at(info.descriptor_index).is_integer;
+ }

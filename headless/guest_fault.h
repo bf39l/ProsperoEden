@@ -18,6 +18,37 @@ inline void RecordGuestFault(std::string description) {
     std::lock_guard lock(guest_fault_mutex);
     if (guest_fault.empty()) guest_fault = std::move(description);
 }
+// Panics are terminal guest failures, not transient early-boot callback races.
+inline bool GuestFaultMayRetry(const std::string& description) {
+    return !description.starts_with("guest panic:");
+}
+inline void RecordGuestPanic(std::uint32_t reason, std::uint64_t thread) {
+    char line[128];
+    std::snprintf(line, sizeof(line), "guest panic: reason %#x on thread %llu", reason,
+                  static_cast<unsigned long long>(thread));
+    RecordGuestFault(line);
+}
+
+// Bounded, read-only evidence at the call site. Validate every word; never read the
+// invalid branch target, dereference guest object pointers, or scan arbitrary memory.
+template<class Valid, class Read, class Emit>
+inline void FaultCallSite(std::uint64_t lr, Valid valid, Read read, Emit emit) {
+    if (lr < 16 || (lr & 3) != 0 || lr > UINT64_MAX - 12) return;
+    for (std::uint64_t address = lr - 16; address < lr + 16; address += 4) {
+        char line[128];
+        if (!valid(address, 4)) {
+            std::snprintf(line, sizeof(line), "EDEN_GUEST_CALL_SITE address=%#llx unmapped",
+                          static_cast<unsigned long long>(address));
+        } else {
+            const auto word = read(address);
+            std::snprintf(line, sizeof(line), "EDEN_GUEST_CALL_SITE address=%#llx instruction=%08x%s",
+                          static_cast<unsigned long long>(address), static_cast<unsigned>(word),
+                          address == lr - 4 ? " before_lr=1" : "");
+        }
+        emit(line);
+    }
+}
+
 inline std::string TakeGuestFault() {
     std::lock_guard lock(guest_fault_mutex);
     return std::exchange(guest_fault, {});

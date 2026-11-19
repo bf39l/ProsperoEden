@@ -14,6 +14,7 @@
 #include "ipc_ring.h"
 #include "unmapped_log.h"
 #include "reactive_flush_log.h"
+#include "indirect_draw_log.h"
 #include "guest_fault.h"
 #include "jit_list.h"
 #include "boot_trace.h"
@@ -796,7 +797,10 @@ int main(int argc, char** argv) {
             Common::Log::Filter filter;
             filter.SetClassLevel(Common::Log::Class::Service_FS, Common::Log::Level::Info);
 #if defined(PS5_NATIVE) && !defined(EDEN_DEV_PROFILE) && !defined(EDEN_DEV_ROM_ID)
-            if (Eden::LoadPreferences().detailed_logging) filter.ParseFilterString("*:Debug");
+            // Keep graphics diagnostics without per-poll service/filesystem Debug traffic:
+            // broad Debug can fill the 100 MiB engine log before a GPU failure happens.
+            if (Eden::LoadPreferences().detailed_logging)
+                filter.ParseFilterString("*:Info Render:Debug Render.Vulkan:Debug HW.GPU:Debug Shader:Debug Core.ARM:Debug");
 #endif
             Common::Log::SetGlobalFilter(filter);
         }
@@ -1287,6 +1291,7 @@ int main(int argc, char** argv) {
             Eden::IpcRing::Reset();
             Eden::UnmappedLog::Reset();
             Eden::ReactiveFlushLog::Reset();
+            Eden::IndirectDrawLog::Reset();
             Eden::ShaderStart::background = speed.background_shader_cache && backend == Eden::GraphicsBackend::Vulkan;
             Eden::ShaderStart::SetProgress({});
             Eden::Report("launch", adaptive_clock ? "Guest clock: adaptive workaround" : "Guest clock: normal");
@@ -2172,7 +2177,8 @@ int main(int argc, char** argv) {
                     // (a boot race between two guest threads); a fresh boot normally passes. Retry early faults, report others.
                     // Four retries: two faults in a row were seen with slower GPU synchronization
                     // (RADV_DEBUG=syncshaders), so the per-boot rate can exceed the usual ~1 in 5.
-                    if (game && session_seconds < 60 && guest_fault_retries < 4) {
+                    if (game && Eden::GuestFaultMayRetry(completion->guest_fault) &&
+                        session_seconds < 60 && guest_fault_retries < 4) {
                         ++guest_fault_retries;
                         relaunch_game = selected_game;
                         relaunch_params = game_params;

@@ -7,6 +7,84 @@ For local integration testing, stay on the branch containing the changes you wan
 
 The fork preserves the upstream prerelease UI and emulator implementation while adding per-game directory scanning, including support for games with updates and DLC stored in individual folders.
 
+## Rebuild in the existing container
+
+For the local FF provenance diagnostics branch, the repository is already on
+`debug/ff-indirect-draw-provenance`. The running container mounts it at `/workspace`,
+including local uncommitted changes. From your Mac terminal:
+
+```bash
+cd /Users/bo/ps5/ProsperoEden-dev
+docker exec -it -w /workspace prosperoeden-build bash -lc \
+  'EDEN_SKIP_SOURCE_CHECKS=1 make release JOBS=4'
+```
+
+This keeps the established Apple Silicon/Rosetta source-check exclusions; native
+CI still runs the full checks. The new provenance checks can be run separately:
+
+```bash
+docker exec -it -w /workspace prosperoeden-build bash -lc \
+  'python3 -B tools/check-indirect-draw-log.py "$(cat .local/headless-cache)/source"'
+```
+
+Outputs are `build/release/PPSA99018` and
+`dist/ProsperoEden-v1.000.001.zip`. The previously built ZIP does not contain
+new local changes until this build completes.
+
+### Run in the background and follow build.log
+
+To keep the build running after the terminal command returns, start it with
+`docker exec -d`. Both standard output and errors go to `/workspace/build.log`.
+Because `/workspace` is the mounted repository, the same file is available on
+macOS at `/Users/bo/ps5/ProsperoEden-dev/build.log`.
+
+From your Mac terminal:
+
+```bash
+cd /Users/bo/ps5/ProsperoEden-dev
+docker exec -d -w /workspace prosperoeden-build bash -lc \
+  'EDEN_SKIP_SOURCE_CHECKS=1 make release JOBS=4 > /workspace/build.log 2>&1' \
+  && echo "started"
+```
+
+Follow the latest output live:
+
+```bash
+cd /Users/bo/ps5/ProsperoEden-dev
+tail -n 80 -f build.log
+```
+
+Press **Ctrl+C** to stop following the log; the detached build keeps running.
+Each new build using `>` replaces the previous `build.log`. Let the current build
+finish before starting another one in the same workspace.
+
+For a quick progress check after about 50 seconds, matching the development workflow:
+
+```bash
+sleep 50
+cd /Users/bo/ps5/ProsperoEden-dev
+E=$(grep -cE 'error:|FAILED:|Assertion|Traceback|Subprocess aborted|does not apply' build.log || true)
+echo "errors=$E"
+grep -nE '== Built|\.zip|eboot.bin' build.log | tail -5
+```
+
+To see the matching error lines rather than just their count:
+
+```bash
+grep -nE 'error:|FAILED:|Assertion|Traceback|Subprocess aborted|does not apply' build.log | tail -30
+```
+
+`started` means Docker accepted the detached command; `errors=0` only means those
+patterns have not appeared yet. Neither confirms the build has finished. Check
+for the final distribution ZIP path and SHA-256 line after `== Built` (the app
+folder is packaged before the ZIP is created). After a successful build, verify
+the ZIP checksum from your Mac:
+
+```bash
+cd /Users/bo/ps5/ProsperoEden-dev/dist
+shasum -a 256 -c SHA256SUMS
+```
+
 ## Requirements
 
 - macOS with Apple Silicon

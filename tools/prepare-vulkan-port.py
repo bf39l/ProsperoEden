@@ -1619,8 +1619,23 @@ adapt('src/video_core/texture_cache/util.cpp', 'texture_util.cpp', [
 # the texture-buffer loop looked like the cost of bind and measured 2.8%.
 adapt('src/video_core/buffer_cache/buffer_cache.h',
       'vulkan-cache/video_core/buffer_cache/buffer_cache.h', [
+    ('        const Binding& binding = channel_state->storage_buffers[stage][index];',
+     '        const Binding& binding = channel_state->storage_buffers[stage][index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"graphics-storage", static_cast<unsigned>(stage), index};'),
+    ('        const Binding& binding = channel_state->compute_storage_buffers[index];',
+     '        const Binding& binding = channel_state->compute_storage_buffers[index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"compute-storage", 0, index};'),
+    ('        const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];',
+     '        const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"graphics-image-buffer", static_cast<unsigned>(stage), index};'),
+    ('        const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];',
+     '        const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"compute-image-buffer", 0, index};'),
+    ('void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {',
+     'void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {\n'
+     '    ::Eden::IndirectDrawLog::GpuWriteTracked(device_addr, size, needs_sync);'),
     ('#include "video_core/buffer_cache/buffer_cache_base.h"',
-     '#include "video_core/buffer_cache/buffer_cache_base.h"\n#include "performance.h"\n#include "staging_chunks.h"'),
+     '#include "video_core/buffer_cache/buffer_cache_base.h"\n#include "performance.h"\n#include "staging_chunks.h"\n#include "indirect_draw_log.h"'),
     # A buffer's upload or download of more than 64 MiB is staged in pieces (headless/staging_chunks.h).
     ('    if constexpr (USE_MEMORY_MAPS) {\n'
      '        auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);\n',
@@ -1772,7 +1787,7 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
                 '::Eden::PipelineIdentity::Compute(*pipeline, shader_hash);')
     anchors = [
         ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n#include "pipeline_identity.h"\n'
-                                 '#include "shader_start.h"\n#include "crash_report.h"'),
+                                 '#include "shader_start.h"\n#include "crash_report.h"\n#include "indirect_draw_log.h"'),
         ('            std::unique_lock lock{build_mutex};',
          '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
         ('            pipeline_statistics->Collect(device, *pipeline);\n        }\n',
@@ -1797,6 +1812,45 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
              '    eden_layout.Stop();\n    auto func{[this, shader_notify, pipeline_statistics] {'),
         ]
     if name == 'vk_graphics_pipeline':
+        anchors.append(('bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {',
+                        'bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {\n'
+                        '    ::Eden::IndirectDrawLog::ProducerScope eden_producer{"graphics", key.Hash(), key.unique_hashes};'))
+    else:
+        anchors.append(('                                BufferCache& buffer_cache, TextureCache& texture_cache) {\n',
+                        '                                BufferCache& buffer_cache, TextureCache& texture_cache) {\n'
+                        '    ::Eden::IndirectDrawLog::ProducerScope eden_producer{"compute", 0, {}, shader_hash};\n'
+                        '    const bool eden_counter_probe = ::Eden::IndirectDrawLog::CounterProbeWanted(shader_hash);\n'))
+    if name == 'vk_compute_pipeline':
+        anchors.append(('            buffer_cache.BindComputeTextureBuffer(index, image_view.GpuAddr(),',
+                        """            if (eden_counter_probe) {
+                const auto eden_cpu = gpu_memory.GpuToCpuAddress(image_view.GpuAddr());
+                ::Eden::IndirectDrawLog::CounterBinding eden_binding{};
+                eden_binding.shader = shader_hash;
+                eden_binding.slot = static_cast<u32>(index);
+                eden_binding.handle = views[index].index;
+                eden_binding.cbuf = desc.cbuf_index;
+                eden_binding.offset = desc.cbuf_offset;
+                eden_binding.count = desc.count;
+                eden_binding.gpu = image_view.GpuAddr();
+                eden_binding.cpu = eden_cpu ? *eden_cpu : 0;
+                eden_binding.mapped = eden_cpu.has_value();
+                eden_binding.bytes = image_view.BufferSize();
+                eden_binding.view_format = static_cast<int>(image_view.format);
+                eden_binding.bound_format = static_cast<int>(format);
+                eden_binding.image = is_image;
+                eden_binding.written = is_written;
+                eden_binding.read = true;
+                if constexpr (is_image) {
+                    eden_binding.read = desc.is_read;
+                    eden_binding.integer = desc.is_integer;
+                    eden_binding.shader_format = static_cast<u32>(desc.format);
+                } else {
+                    eden_binding.integer = desc.is_integer;
+                }
+                ::Eden::IndirectDrawLog::ProbeCounterBinding(eden_binding);
+            }
+            buffer_cache.BindComputeTextureBuffer(index, image_view.GpuAddr(),"""))
+    if name == 'vk_graphics_pipeline':
         anchors += configure_phases
     # While the driver compiles the pipeline, a crash report names it after the thread
     # (headless/crash_report.h, Doing): a fault inside the driver leaves no other trace of the shader
@@ -1811,6 +1865,11 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
                         '            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);\n'))
     adapt(f'src/video_core/renderer_vulkan/{name}.cpp', name + '_cost.cpp', anchors)
 shader_costs = [
+    # New shader metadata includes integer texel-buffer formats; old file environments
+    # did not record them. Use a PS5-specific internal cache version, not an app version.
+    ('constexpr u32 CACHE_VERSION = 19;', 'constexpr u32 CACHE_VERSION = 0x50530014;'),
+    ('    host_info.ApplyDescriptorLimitPolicy();',
+     '    host_info.support_integer_texture_buffers = true;\n    host_info.ApplyDescriptorLimitPolicy();'),
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include <set>\n#include <unordered_set>\n'
      '#include "performance.h"\n#include "dev_vulkan.h"\n#include "diagnostics.h"'),
     # For testing a game that stops the GPU (dev_vulkan.h coherent_storage, from a game's
