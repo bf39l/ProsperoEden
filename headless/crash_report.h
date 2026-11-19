@@ -72,8 +72,14 @@ void Install(const std::string& logs_folder, const char* version, bool restarted
 void SetSession(const std::string& text, bool game) noexcept;
 
 // The app found an error it cannot continue from (an exception nothing caught): the report says
-// why, then the same course as for a signal. Does not return.
+// why, then the same course as for a signal. Device loss closes instead of
+// restarting against the failed GPU. Does not return.
 [[noreturn]] void Fail(const char* reason) noexcept;
+
+// Driver-detected GPU stalls and device loss close the process after recording
+// the report; relaunching against the failed GPU can hang again.
+void NoteGpuStalled() noexcept;
+bool GpuStalled() noexcept;
 
 // For the checks (tools/check-crash-report.py).
 bool Readable(const void* address, std::size_t bytes) noexcept;

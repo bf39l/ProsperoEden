@@ -36,6 +36,21 @@ function(write_derived path content)
     file(WRITE "${path}.in" "${content}")
     configure_file("${path}.in" "${path}" COPYONLY)
 endfunction()
+# The last service calls (headless/ipc_ring.h): after Eden writes a reply into the calling
+# thread's local storage, the reply is read back from there and recorded with its service and
+# command, in every build; a game that breaks (svcBreak) prints them. Applied to service.cpp by
+# the development build's own patch of it too.
+function(eden_ipc_ring_service var)
+    set(source "${${var}}")
+    set(site "    if (system.IsPoweredOn()) {\n        ctx.WriteToOutgoingCommandBuffer();\n")
+    string(FIND "${source}" "${site}" at)
+    if(at LESS 0)
+        message(FATAL_ERROR "Pinned service reply write changed; review the service call record.")
+    endif()
+    string(REPLACE "${site}" "${site}        {\n            std::array<u32, 64> eden_reply{};\n            auto& eden_thread = ctx.GetThread();\n            eden_thread.GetOwnerProcess()->GetMemory().ReadBlock(eden_thread.GetTlsAddress(), eden_reply.data(),\n                                                                 sizeof(eden_reply));\n            ::Eden::IpcRing::Record(service_name, eden_thread.GetThreadId(), ctx.GetCommand(),\n                                    static_cast<u32>(ctx.GetCommandType()), eden_reply.data(), eden_reply.size());\n        }\n" source "${source}")
+    set(${var} "#include <array>\n#include \"${EDEN_PORT_DIR}/ipc_ring.h\"\n#include \"core/hle/kernel/k_process.h\"\n#include \"core/memory.h\"\n${source}" PARENT_SCOPE)
+endfunction()
+
 # Each Vulkan pipeline locks its own std::mutex and signals its own std::condition_variable once,
 # when its build ends, and keeps both while it is cached. On the PS5 those are thread library
 # objects, of which a process has only so many: a game with thousands of pipelines used them up
@@ -1195,6 +1210,7 @@ if(EDEN_DEV_PROFILE)
     # HLE service requests: handling time per service command, and the guest's
     # svcSendSyncRequest latency (queueing behind other requests included).
     file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/service/service.cpp" hle_source)
+    eden_ipc_ring_service(hle_source)
     foreach(hle_call "        InvokeRequest(ctx);" "            InvokeRequestTipc(ctx);")
         string(FIND "${hle_source}" "${hle_call}" hle_at)
         if(hle_at LESS 0)
@@ -1238,6 +1254,29 @@ if(EDEN_DEV_PROFILE)
     list(REMOVE_ITEM core_sources "hle/kernel/svc/svc_ipc.cpp")
     list(APPEND core_sources "${PORT_BUILD_DIR}/svc_ipc.cpp")
 endif()
+if(NOT EDEN_DEV_PROFILE)
+    file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/service/service.cpp" hle_source)
+    eden_ipc_ring_service(hle_source)
+    write_derived("${PORT_BUILD_DIR}/hle_service.cpp" "${hle_source}")
+    list(REMOVE_ITEM core_sources "hle/service/service.cpp")
+    list(APPEND core_sources "${PORT_BUILD_DIR}/hle_service.cpp")
+endif()
+# A game that stops itself prints the last service calls first (headless/ipc_ring.h).
+# A stop sets System::is_powered_on false before it suspends the cores, and from then Eden's
+# services write no reply (service.cpp) while the waiting caller is still woken: it reads its own
+# request back and stops with 2010-0212 (InvalidCmifOutHeader), its last call missing from the
+# ring. Every 2010-0212 in Oliv3rmoon/Nightshade#3 and #4's logs came 1 to 7 ms after the menu
+# shortcut or a renderer failure had begun the stop, so such a break says it was the stop's.
+file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/svc/svc_exception.cpp" break_source)
+set(break_site "    bool notification_only = True(reason & BreakReason::NotificationOnlyFlag);\n")
+string(FIND "${break_source}" "${break_site}" break_at)
+if(break_at LESS 0)
+    message(FATAL_ERROR "Pinned svcBreak changed; review where the last service calls are printed.")
+endif()
+string(REPLACE "${break_site}" "${break_site}    if (!notification_only && system.IsShuttingDown()) {\n        LOG_CRITICAL(Debug_Emulated, \"EDEN_BREAK_DURING_STOP the session was already stopping: services write no reply \"\n                                     \"then, so a call that waited for one reads its own request (2010-0212)\");\n    }\n    if (!notification_only) {\n        ::Eden::IpcRing::Dump(GetCurrentThread(system.Kernel()).GetThreadId(),\n                              [](const char* line) { LOG_CRITICAL(Debug_Emulated, \"{}\", line); });\n    }\n" break_source "${break_source}")
+write_derived("${PORT_BUILD_DIR}/svc_exception.cpp" "#include \"${EDEN_PORT_DIR}/ipc_ring.h\"\n${break_source}")
+list(REMOVE_ITEM core_sources "hle/kernel/svc/svc_exception.cpp")
+list(APPEND core_sources "${PORT_BUILD_DIR}/svc_exception.cpp")
 file(READ "${PROJECT_SOURCE_DIR}/src/core/memory.cpp" arena_source)
 # An unmap zeroes the entries directly: zero the JIT's direct values first (jit-page-table.cmake).
 set(unmap_old "            page_table.entries.ZeroRegion(base, end);\n")
@@ -1309,6 +1348,20 @@ if(EDEN_A32_FASTMEM)
     string(REPLACE "${arena_old}" "        if (process.IsApplication() && !process.Is64Bit() && Settings::IsFastmemEnabled()) {"
         arena_source "${arena_source}")
 endif()
+# Unmapped reads and writes: a session's first 64 logged, then every power of two with its
+# count (headless/unmapped_log.h), not one line for each of a game's millions.
+set(unmapped_read_old "            LOG_ERROR(HW_Memory, \"Unmapped Read{} @ {:#016x}\", sizeof(T) * 8, addr);")
+set(unmapped_read_new "            if (u64 eden_seen; ::Eden::UnmappedLog::Wanted(&eden_seen))\n                LOG_ERROR(HW_Memory, \"Unmapped Read{} @ {:#016x} (unmapped access {})\", sizeof(T) * 8, addr, eden_seen);")
+set(unmapped_write_old "            LOG_ERROR(HW_Memory, \"Unmapped Write{} @ {:#016x} = {:#016x}\", sizeof(T) * 8, addr, u64(data));")
+set(unmapped_write_new "            if (u64 eden_seen; ::Eden::UnmappedLog::Wanted(&eden_seen))\n                LOG_ERROR(HW_Memory, \"Unmapped Write{} @ {:#016x} = {:#016x} (unmapped access {})\", sizeof(T) * 8, addr, u64(data), eden_seen);")
+foreach(pair IN ITEMS unmapped_read unmapped_write)
+    string(FIND "${arena_source}" "${${pair}_old}" pair_at)
+    if(pair_at LESS 0)
+        message(FATAL_ERROR "Pinned unmapped access log changed (${pair})")
+    endif()
+    string(REPLACE "${${pair}_old}" "${${pair}_new}" arena_source "${arena_source}")
+endforeach()
+string(PREPEND arena_source "#include \"${EDEN_PORT_DIR}/unmapped_log.h\"\n")
 set(span_old [=[    [[nodiscard]] inline const u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
         return (current_page_table->entries[addr >> YUZU_PAGEBITS].Block() == current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block()) ? GetPointerSilent(addr) : nullptr;
     }
@@ -1529,7 +1582,7 @@ if(PS5_NATIVE)
                     const int r = Common::Compression::DecompressDataZBIC(
                         std::span<u8>{destination, nso_header.segments[i].size},
                         std::span<const u8>{compressed_data}.first(nso_header.segments_compressed_size[i]));
-                    if (r <= 0) return std::nullopt;
+                    if (r < 0 || static_cast<u64>(r) != nso_header.segments[i].size) return std::nullopt;
                 } else {
                     const int r = Common::Compression::DecompressDataLZ4(destination, nso_header.segments[i].size,
                         compressed_data.data(), nso_header.segments_compressed_size[i]);

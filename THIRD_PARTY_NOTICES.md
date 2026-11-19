@@ -122,7 +122,10 @@ direct-memory allocation/reuse, the guest-memory reserve (with this fork's fault
 recovery retained), graphics memory budgeting, staging buffers/chunks, ASTC
 conversion policy, kernel spin locks and adaptive idle polling, buffered shader
 cache reads, background pipeline loading and worker placement, shutdown ordering,
-newest-update selection, and shared-font bounds. The associated headers, source
+newest-update selection, shared-font bounds, exact-size ZBIC decoding, unmapped
+access log throttling, close-with-report handling for GPU device loss, and bounded IPC/startup diagnostics (`ipc_ring.h`,
+`start_wait.h`, `unmapped_log.h` and associated checks, including the synthetic
+`tools/nso_files.py` fixtures). The associated headers, source
 adaptations and regression/soak checks are described in
 [docs/NIGHTSHADE-PORT.md](docs/NIGHTSHADE-PORT.md). Existing copyright and SPDX
 notices are retained; the integration adapts these changes to the newer Eden API.

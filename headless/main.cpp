@@ -11,6 +11,8 @@
 #include "gpu_failure.h"
 #include "guest_clock.h"
 #include "shader_start.h"
+#include "ipc_ring.h"
+#include "unmapped_log.h"
 #include "guest_fault.h"
 #include "jit_list.h"
 #include "boot_trace.h"
@@ -357,6 +359,10 @@ int main(int argc, char** argv) {
         static Eden::LogFlusher log_flusher;
         if (!log_flusher.Start(Eden::LoadPreferences().immediate_logs)) return 2;
         Eden::Crash::Install(Eden::LogsDir(), Eden::kAppVersion, last_crash.restarted);
+        // Record device loss immediately on the worker; do not attempt normal
+        // teardown or restart while the GPU is unresponsive.
+        Eden::gpu_stalled = &Eden::Crash::GpuStalled;
+        Eden::gpu_lost = [](const char* reason) noexcept { Eden::Crash::Fail(reason); };
         Eden::BootTrace::Ready(Eden::LogsDir(), Eden::FilesystemAccess());
         Eden::BootTrace::Line("logs and crash handler ready (%s)", Eden::LogsDir().c_str());
         for (const char* folder : {"/app0", Eden::kMountedAppDir, Eden::kInstallDir, "/mnt/sandbox/PPSA99018_000/app0"})
@@ -1276,6 +1282,8 @@ int main(int argc, char** argv) {
             // Nightshade: normal guest time by default; reset offsets between game sessions.
             const bool adaptive_clock = Eden::LoadAdaptiveClock(eden_game_title_id(guest));
             Eden::GuestClock::Reset(adaptive_clock);
+            Eden::IpcRing::Reset();
+            Eden::UnmappedLog::Reset();
             Eden::ShaderStart::background = speed.background_shader_cache && backend == Eden::GraphicsBackend::Vulkan;
             Eden::ShaderStart::SetProgress({});
             Eden::Report("launch", adaptive_clock ? "Guest clock: adaptive workaround" : "Guest clock: normal");

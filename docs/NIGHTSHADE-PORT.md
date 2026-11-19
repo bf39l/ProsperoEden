@@ -29,8 +29,12 @@ The application remains ProsperoEden, PPSA99018, content version `01.000.001`.
 | Vulkan textures | Layer-at-a-time ASTC conversion in the actual Vulkan copy of texture utilities, chunked transfers, and bounded background conversion work. Light scenes may send moderate textures to background conversion instead of freezing all conversion workers. |
 | Staging memory | Large mapped transfers rounded in 16 MiB steps, capacity-checked buffer reuse, completed idle buffers released before one retry, and large transfers split into chunks. |
 | CPU scheduling | Read-before-write spin locks, PAUSE in context retries, and adaptive idle polling with interrupt timestamps and corrected idle CPU accounting. |
+| GPU device loss | Write the crash report and close on `VK_ERROR_DEVICE_LOST`; the GPU worker reports immediately instead of entering normal teardown. Ordinary exception recovery remains unchanged. |
 | Shutdown | Request timing-thread stop before waking its waits, preventing a consumed wake from hanging join. |
 | Update selection | Keep code/control/version entries from the newest update regardless of directory scan order; retain the other versions in the version list. |
+| NSO decoding | Require the decoded ZBIC byte count to equal the declared segment size, including positive-but-short results. Existing layout/BSS/patch/dump handling is retained. |
+| Fault logging | Log the first 64 unmapped accesses, then powers of two, with the total count. Reset before each guest session; memory access behavior is unchanged. |
+| Startup diagnostics | Keep a 64-entry service-reply ring in memory, dump it on non-notification svcBreak, and report prolonged first-frame startup at 45/90/180 seconds. Both renderers use the watcher; it does not stop or restart the game. |
 | Shared fonts | Reject short, unaligned, oversized or overflowing font input before reading/copying into shared memory. Font-mod UI/features are not imported. |
 | Shader-cache reads | Buffered, chunked reads and positions; preserve valid entries of a damaged/truncated cache. |
 | Shader startup | Bounded background pipeline loading on Vulkan, duplicate ownership/save coordination, stop/join before teardown, startup worker placement and later return to spare CPUs. OpenGL remains foreground. |
@@ -112,13 +116,63 @@ app identity, executable bytes and both project credits were verified.
 
 Outputs: `build/release/PPSA99018`, `dist/ProsperoEden-v1.000.001.zip`, and
 `build/symbols/ProsperoEden-v1.000.001.elf` (retain for crash symbolization).
-ZIP SHA-256: `7f1f3b1d9d1d98e2311dac46a767176162499646579b62b4a1e3a16179112164`.
+ZIP SHA-256: `32e9e990044e209dc2a2ee883b4ab00d96705dbf9767801a3364bf5cbbea8375`.
 
 Supported focused regressions passed for the new engine behavior and retained
 settings/history, NSO loading, audio/cheat shutdown, failed-load/content teardown,
 repeated COW recovery, JIT aliases, and Home behavior. The whole host source suite
 was not run as the final package gate; native-x86 race checks and PS5 tests remain
 separate. The memory model limitation above remains.
+
+## GPU device loss recovery
+
+Adapt Nightshade's close-with-report policy for `VK_ERROR_DEVICE_LOST` on any
+reporting thread, including the native GPU worker. The worker calls the fatal
+reporter immediately so teardown does not wait on the failed GPU. The report and
+restart note say the app closes, and the exit helper is used instead of restarting.
+Ordinary crashes keep their existing restart/no-restart-loop policy; ordinary
+worker errors keep their existing stop/failure path.
+
+A driver-facing `eden_gpu_stalled` hook can mark a detected stall so a subsequent
+fault also closes. The current driver must actually call it to provide that
+signal; this port does not add Belladonna's complete stall-dump instrumentation
+or claim to detect every GPU hang. Closing avoids an automatic restart onto a
+failed GPU, but cannot guarantee recovery from a console-level driver fault.
+
+The crash reporter tests pass both host and mocked-console calls: device-loss
+exceptions, explicit fatal device-loss calls, and faults after a marked stall
+write one report and exit without restarting. Native-worker tests cover device
+loss and ordinary exceptions, as well as creation failure, stop/wake/join and
+blocked-command teardown. The Docker release build and package validation pass.
+
+Release 1.000.001 retains Eden `d85bad89`. Any `eden-nx2` migration is deferred to
+a separate experiment after this release, not included in this branch.
+
+## Diagnosing a stalled startup
+
+`/data/prosperoeden/logs/stderr.log` gets `EDEN_START_WAIT` once at 45, 90 and
+180 seconds in the final starting step, until the first picture arrives. It names
+whether the GPU recently had an empty command queue, completed service-call
+count and time since the last completed call. At 45 and 180 seconds it also prints
+the latest calls as `EDEN_IPC_RING`. A load stuck in an earlier step is outside
+this watcher's scope.
+
+On a non-notification guest `svcBreak`, Eden's normal log also receives the ring,
+including thread, service/command/type, reply-header words and CMIF result when
+found. Check `/data/prosperoeden/user/log/eden_log.txt` alongside stderr.log.
+`EDEN_BREAK_DURING_STOP` labels a break observed after shutdown already began;
+it does not suppress the break or change the service reply.
+
+Recording is bounded and silent during ordinary play; no per-call heap allocation
+or per-call file logging is added. IPC and unmapped-access counters reset before
+constructing each guest. The ring is a history of completed replies, not a full
+trace of pending calls and not proof of a particular stall's root cause.
+
+The follow-up Docker build/package validation and focused diagnostic checks pass:
+77 log lines for a million invalid accesses; real ZBIC round-trips and malformed
+frames; short/long/exact NSO decode-size cases; 8,000 concurrent IPC records,
+wraparound, reentrant dumps and resets; timed watchdog reports; retained Home and
+repeated COW recovery checks. Architecture-related test exclusions remain as above.
 
 ## Console comparison
 

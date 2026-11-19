@@ -9,6 +9,8 @@ What changed in each release of ProsperoEden, newest first. A release's notes on
 - Adapt selected Nightshade validation 1.010.015 engine improvements for audio queues, guest timing, memory spans, shader atomics/coherence, indirect arguments, indexed storage images and DMA fills.
 - Add bounded background Vulkan shader-cache loading, buffered cache reads, layered ASTC conversion, staging-buffer sizing/chunking, adaptive idle polling and reclaimable heap/memory-pressure handling.
 - Fix timing-thread shutdown ordering, newest-update content selection and shared-font input bounds.
+- Reject incomplete ZBIC NSO segments; rate-limit repeated unmapped-access logs; retain the latest 64 service replies and report stalled startup at 45/90/180 seconds.
+- Write a crash report and close on GPU device loss instead of restarting against the failed GPU; retain ordinary crash recovery and non-device-loss worker shutdown.
 - Retain Eden `d85bad89`, LLVM 21, the PS5 64-file VFS cache, existing NCA/firmware handling, program switching, settings recovery and repeated guest-write recovery.
 
 ### Launcher
