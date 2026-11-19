@@ -962,9 +962,10 @@ string(FIND "${physical_core_source}" "${prefetch_old}" prefetch_at)
 if(prefetch_at LESS 0)
     message(FATAL_ERROR "Pinned prefetch-abort handling changed")
 endif()
-# Guest core idle: count each wait and how long it lasted, and spin on the
-# interrupt flag for a bounded time before sleeping on the condition variable, because waking a
-# sleeping host thread puts the host scheduler's latency on the guest's critical path.
+# Guest core idle: count each wait and how long it lasted, and poll the interrupt flag before
+# sleeping on the condition variable, because waking a sleeping host thread puts the host
+# scheduler's latency on the guest's critical path. How long each core polls follows its recent
+# waits (performance.h, AdaptIdlePoll).
 set(idle_old "void PhysicalCore::Idle() {\n    std::unique_lock lk{m_guard};\n    m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });\n}")
 string(FIND "${physical_core_source}" "${idle_old}" idle_at)
 if(idle_at LESS 0)
@@ -972,17 +973,46 @@ if(idle_at LESS 0)
 endif()
 string(REPLACE "${idle_old}" [=[void PhysicalCore::Idle() {
     const long long start = ::Eden::Performance::NowNs();
-    const unsigned spins = ::Eden::Performance::idle_spin_iterations.load(std::memory_order_relaxed);
-    for (unsigned i = 0; i < spins && !__atomic_load_n(&m_is_interrupted, __ATOMIC_ACQUIRE); ++i)
-        __builtin_ia32_pause();
+    const long long poll = ::Eden::Performance::IdlePollBudget(m_core_index);
+    if (poll > 0)
+        for (unsigned i = 1; !__atomic_load_n(&m_is_interrupted, __ATOMIC_ACQUIRE); ++i) {
+            ::Eden::CpuRelax();
+            if ((i & 63) == 0 && ::Eden::Performance::NowNs() - start >= poll) break;
+        }
+    const long long spun = poll > 0 ? ::Eden::Performance::NowNs() - start : 0;
     bool slept;
+    long long raised;
     {
         std::unique_lock lk{m_guard};
         slept = !m_is_interrupted;
         m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
+        raised = ::Eden::Performance::RaisedNs(m_core_index);
     }
-    ::Eden::Performance::CountIdle(m_core_index, ::Eden::Performance::NowNs() - start, slept);
+    const long long waited = ::Eden::Performance::NowNs() - start;
+    ::Eden::Performance::CountIdle(m_core_index, waited, slept, spun);
+    ::Eden::Performance::AdaptIdlePoll(m_core_index, raised > start ? raised - start : 0, slept);
 }]=] physical_core_source "${physical_core_source}")
+# The time an interrupt raises a core's flag, for the core's idle poll (performance.h AdaptIdlePoll).
+# Idle and IsInterrupted read the flag without the lock, so those reads and the flag's writes
+# (under the lock) are atomic.
+set(interrupt_old "    // Add interrupt flag.\n    m_is_interrupted = true;")
+set(clear_old "    std::scoped_lock lk{m_guard};\n    m_is_interrupted = false;")
+set(is_interrupted_old "bool PhysicalCore::IsInterrupted() const {\n    return m_is_interrupted;\n}")
+foreach(pinned_text IN ITEMS interrupt_old clear_old is_interrupted_old)
+    string(FIND "${physical_core_source}" "${${pinned_text}}" pinned_at)
+    if(pinned_at LESS 0)
+        message(FATAL_ERROR "Pinned PhysicalCore::Interrupt or ClearInterrupt changed")
+    endif()
+endforeach()
+string(REPLACE "${interrupt_old}"
+    "    // Add interrupt flag.\n    if (!m_is_interrupted) ::Eden::Performance::NoteInterrupt(m_core_index);\n    __atomic_store_n(&m_is_interrupted, true, __ATOMIC_RELEASE);"
+    physical_core_source "${physical_core_source}")
+string(REPLACE "${clear_old}"
+    "    std::scoped_lock lk{m_guard};\n    __atomic_store_n(&m_is_interrupted, false, __ATOMIC_RELAXED);"
+    physical_core_source "${physical_core_source}")
+string(REPLACE "${is_interrupted_old}"
+    "bool PhysicalCore::IsInterrupted() const {\n    return __atomic_load_n(&m_is_interrupted, __ATOMIC_ACQUIRE);\n}"
+    physical_core_source "${physical_core_source}")
 string(REPLACE "${prefetch_old}"
     "            } else {\n                interface->LogBacktrace(process);\n                if (prefetch_abort)\n                    ::Eden::RecordGuestFault(\"guest thread \" + Core::GetThreadName(thread).value_or(\"?\") +\n                                             \" jumped to an unmapped address\");\n            }\n            thread->RequestSuspend(kernel, SuspendType::Debug);"
     physical_core_source "${physical_core_source}")
@@ -992,6 +1022,16 @@ write_derived("${PORT_BUILD_DIR}/physical_core.cpp"
 # rate is applied where Eden applies its own clock settings, and it follows the frames the
 # game hands in (BufferQueueProducer::QueueBuffer, below).
 file(READ "${PROJECT_SOURCE_DIR}/src/core/core_timing.cpp" core_timing_source)
+# Publish the stop request before waking either wait. Otherwise the timing thread can
+# consume the wake, re-enter Wait(), and leave Reset permanently blocked in join().
+set(timing_stop_old "    paused = true;\n    pause_event.Set();\n    event.Set();\n    if (timer_thread.joinable()) {\n        timer_thread.request_stop();\n        timer_thread.join();\n    }")
+string(FIND "${core_timing_source}" "${timing_stop_old}" timing_stop_at)
+if(timing_stop_at LESS 0)
+    message(FATAL_ERROR "Pinned CoreTiming::Reset changed")
+endif()
+string(REPLACE "${timing_stop_old}"
+    "    paused = true;\n    if (timer_thread.joinable()) {\n        timer_thread.request_stop();\n    }\n    pause_event.Set();\n    event.Set();\n    if (timer_thread.joinable()) {\n        timer_thread.join();\n    }"
+    core_timing_source "${core_timing_source}")
 set(guest_clock_old "    if (::Settings::values.sync_core_speed.GetValue()) {")
 string(FIND "${core_timing_source}" "${guest_clock_old}" guest_clock_at)
 if(guest_clock_at LESS 0)
@@ -1018,6 +1058,21 @@ list(REMOVE_ITEM core_sources "core_timing.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/core_timing.cpp")
 list(REMOVE_ITEM core_sources "hle/kernel/physical_core.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/physical_core.cpp")
+# The scheduler retries a thread's context guard while another core holds it (the thread is still
+# switching away there). Pinned Eden retries at full speed; PAUSE between tries leaves the core's
+# other hardware thread its share and keeps the retries off the line the holder has to write.
+file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/k_scheduler.cpp" scheduler_source)
+set(guard_retry_old "                // If we do, another core is interfering, and we must start again.\n                goto retry;\n            }\n        }")
+string(FIND "${scheduler_source}" "${guard_retry_old}" guard_retry_at)
+if(guard_retry_at LESS 0)
+    message(FATAL_ERROR "Pinned KScheduler context guard retry changed")
+endif()
+string(REPLACE "${guard_retry_old}"
+    "                // If we do, another core is interfering, and we must start again.\n                goto retry;\n            }\n            ::Eden::CpuRelax();\n        }"
+    scheduler_source "${scheduler_source}")
+write_derived("${PORT_BUILD_DIR}/k_scheduler.cpp" "#include \"${EDEN_PORT_DIR}/kernel_spin_lock.h\"\n${scheduler_source}")
+list(REMOVE_ITEM core_sources "hle/kernel/k_scheduler.cpp")
+list(APPEND core_sources "${PORT_BUILD_DIR}/k_scheduler.cpp")
 # Guest kernel spin locks spin before blocking (performance.h kernel_spin_iterations).
 file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/k_spin_lock.cpp" spin_source)
 set(spin_old "void KSpinLock::Lock() {\n    m_lock.lock();\n}")
@@ -1254,6 +1309,32 @@ if(EDEN_A32_FASTMEM)
     string(REPLACE "${arena_old}" "        if (process.IsApplication() && !process.Is64Bit() && Settings::IsFastmemEnabled()) {"
         arena_source "${arena_source}")
 endif()
+set(span_old [=[    [[nodiscard]] inline const u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
+        return (current_page_table->entries[addr >> YUZU_PAGEBITS].Block() == current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block()) ? GetPointerSilent(addr) : nullptr;
+    }
+    [[nodiscard]] inline u8* GetSpan(const VAddr addr, const std::size_t size) noexcept {
+        return (current_page_table->entries[addr >> YUZU_PAGEBITS].Block() == current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block()) ? GetPointerSilent(addr) : nullptr;
+    }
+]=])
+set(span_new [=[    [[nodiscard]] inline bool OnePiece(const VAddr addr, const std::size_t size) const noexcept {
+        const VAddr masked = addr & 0xffffffffffffULL;
+        return size != 0 && AddressSpaceContains(*current_page_table, masked, size) &&
+               ::Eden::GuestSpan::OnePiece(current_page_table->entries, masked >> YUZU_PAGEBITS,
+                                           (masked + size - 1) >> YUZU_PAGEBITS);
+    }
+    [[nodiscard]] inline const u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
+        return OnePiece(addr, size) ? GetPointerSilent(addr) : nullptr;
+    }
+    [[nodiscard]] inline u8* GetSpan(const VAddr addr, const std::size_t size) noexcept {
+        return OnePiece(addr, size) ? GetPointerSilent(addr) : nullptr;
+    }
+]=])
+string(FIND "${arena_source}" "${span_old}" span_at)
+if(span_at LESS 0)
+    message(FATAL_ERROR "Pinned Memory::GetSpan changed; review headless/guest_span.h")
+endif()
+string(REPLACE "${span_old}" "${span_new}" arena_source "${arena_source}")
+string(PREPEND arena_source "#include \"${EDEN_PORT_DIR}/guest_span.h\"\n")
 write_derived("${PORT_BUILD_DIR}/memory.cpp" "${arena_source}")
 list(REMOVE_ITEM core_sources "memory.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/memory.cpp")
@@ -1521,6 +1602,8 @@ function(eden_patch source old new)
     string(REPLACE "${old}" "${new}" patched "${${source}}")
     set(${source} "${patched}" PARENT_SCOPE)
 endfunction()
+include("${EDEN_PORT_DIR}/nightshade_engine.cmake")
+
 
 # Mods (headless/mods.h). Eden's .pchtxt reader takes every line as a record or a flag: the
 # credits at the end of a real patch file then wrote over the start of the game's code. Only
@@ -2296,17 +2379,24 @@ file(READ "${PROJECT_SOURCE_DIR}/src/audio_core/sink/sink_details.cpp" sink_sour
 string(REPLACE "    return GetOutputSinkDetails(sink_id).factory(device_id);"
     "    if (device_id == \"ps5\") return std::make_unique<Eden::AudioSink>();\n    return GetOutputSinkDetails(sink_id).factory(device_id);" sink_source "${sink_source}")
 write_derived("${PORT_BUILD_DIR}/sink_details.cpp" "#include \"devices.h\"\n${sink_source}")
-# Mirror mono PCM into both hardware channels in the existing upmix path.
 file(READ "${PROJECT_SOURCE_DIR}/src/audio_core/sink/sink_stream.cpp" stream_source)
-string(REPLACE "    if (type == StreamType::In)\n        return;"
-    "    if (type == StreamType::In)\n        return;\n    static_assert(std::is_same_v<decltype(samples_buffer), Common::RingBuffer<s16, 0x10000>>);\n    if (buffer.frames * device_channels > 0x10000 - samples_buffer.Size())\n        throw std::overflow_error(\"Audio PCM queue capacity exceeded\");" stream_source "${stream_source}")
+# A full PCM ring drops its oldest audio (headless/audio_queue.h) instead of stopping the game
+# (issue 270); upstream's ring would cut the new buffer short and leave the queue out of step.
+set(old_stream_append "    if (type == StreamType::In)\n        return;\n\n    constexpr s32 min")
+string(FIND "${stream_source}" "${old_stream_append}" stream_append_offset)
+if(stream_append_offset LESS 0)
+    message(FATAL_ERROR "Pinned SinkStream::AppendBuffer changed; review the full queue handling.")
+endif()
+string(REPLACE "${old_stream_append}"
+    "    if (type == StreamType::In)\n        return;\n    static_assert(std::is_same_v<decltype(samples_buffer), Common::RingBuffer<s16, 0x10000>>);\n    if (buffer.frames * device_channels > 0x10000)\n        throw std::invalid_argument(\"Audio PCM buffer larger than the queue\");\n    if (buffer.frames * device_channels > 0x10000 - samples_buffer.Size()) {\n        std::unique_lock release_lk{release_mutex};\n        const u64 dropped = Eden::AudioQueue::DropOldest(samples_buffer, 0x10000, queue, playing_buffer, queued_buffers, device_channels, buffer.frames * device_channels);\n        release_lk.unlock();\n        release_cv.notify_one();\n        {\n            std::scoped_lock count_lk{sample_count_lock};\n            min_played_sample_count += dropped;\n            max_played_sample_count += dropped;\n        }\n        static std::atomic<u32> full_count{};\n        const u32 times = ++full_count;\n        if (times <= 8 || times % 256 == 0)\n            LOG_WARNING(Audio_Sink, \"EDEN_AUDIO_QUEUE_FULL stream={} dropped_frames={} times={}\", name, dropped, times);\n    }\n\n    constexpr s32 min" stream_source "${stream_source}")
+# Mirror mono PCM into both hardware channels in the existing upmix path.
 string(REPLACE "        samples_buffer.Push(new_samples);"
     "        if (system_channels == 1 && device_channels == 2) {\n            for (std::size_t i = 0; i < new_samples.size(); i += 2) new_samples[i + 1] = new_samples[i];\n        }\n        samples_buffer.Push(new_samples);" stream_source "${stream_source}")
 # Refresh the held frame before a partial hardware block underruns.
 string(REPLACE "    std::memcpy(last_frame.data(), &output_buffer[(frames_written - 1) * frame_size], frame_size_bytes);" "" stream_source "${stream_source}")
 string(REPLACE "        samples_buffer.Pop(&output_buffer[frames_written * frame_size], frames_available * frame_size);"
     "        samples_buffer.Pop(&output_buffer[frames_written * frame_size], frames_available * frame_size);\n        if (frames_available) std::memcpy(last_frame.data(), &output_buffer[(frames_written + frames_available - 1) * frame_size], frame_size_bytes);" stream_source "${stream_source}")
-write_derived("${PORT_BUILD_DIR}/sink_stream.cpp" "#include <stdexcept>\n${stream_source}")
+write_derived("${PORT_BUILD_DIR}/sink_stream.cpp" "#include <stdexcept>\n#include \"audio_queue.h\"\n#include \"common/logging.h\"\n${stream_source}")
 # A bitfield expression yields 0/1, so explicitly restore the SRC flag's bit position.
 file(READ "${PROJECT_SOURCE_DIR}/src/audio_core/renderer/voice/voice_info.cpp" voice_source)
 set(old_voice_flag "flags |= u16(params.flags.IsVoicePitchAndSrcSkippedSupported);")
@@ -2795,7 +2885,7 @@ if(shader_reader_begin LESS 0 OR shader_reader_end LESS shader_reader_begin)
 endif()
 string(SUBSTRING "${shader_environment_source}" 0 ${shader_reader_begin} shader_environment_head)
 string(SUBSTRING "${shader_environment_source}" ${shader_reader_end} -1 shader_environment_tail)
-string(PREPEND shader_environment_head "#include <cstdio>\n#include <new>\n#include <stdexcept>\n#include <system_error>\n")
+string(PREPEND shader_environment_head "#include <cerrno>\n#include <cstdio>\n#include <new>\n#include <stdexcept>\n#include <streambuf>\n#include <system_error>\n#include <fcntl.h>\n#include <sys/stat.h>\n#include <unistd.h>\n")
 write_derived("${PORT_BUILD_DIR}/shader_environment.cpp"
     "${shader_environment_head}#include \"${EDEN_PORT_DIR}/shader_cache_reader.inc\"\n\n${shader_environment_tail}")
 set_property(SOURCE "${PORT_BUILD_DIR}/shader_environment.cpp" APPEND PROPERTY OBJECT_DEPENDS
@@ -2840,7 +2930,11 @@ string(REPLACE "${recompress_old}" [=[            // A layer at a time (headless
 ]=] texture_util_source "${texture_util_source}")
 write_derived("${PORT_BUILD_DIR}/texture_cache_util.cpp" "${texture_util_source}")
 list(REMOVE_ITEM video_sources texture_cache/util.cpp)
-list(APPEND video_sources "${PORT_BUILD_DIR}/texture_cache_util.cpp")
+# The Vulkan port links its own copy of util.cpp (tools/prepare-vulkan-port.py, texture_util.cpp,
+# with the same layer-at-a-time recompression): with both in the library this one was never used.
+if(NOT "${PORT_BUILD_DIR}/texture_util.cpp" IN_LIST video_sources)
+    list(APPEND video_sources "${PORT_BUILD_DIR}/texture_cache_util.cpp")
+endif()
 list(REMOVE_ITEM video_sources shader_environment.cpp)
 list(APPEND video_sources "${PORT_BUILD_DIR}/shader_environment.cpp")
 set_property(TARGET video_core PROPERTY SOURCES "${video_sources}")
@@ -2997,14 +3091,25 @@ void Initialize() {
     if(NOT heap_hash STREQUAL "df61acb51502c3b75c4fda62859c42eac6d19a6690f9b68c0e2dfbf20ae72c0f")
         message(FATAL_ERROR "The shared heap changed since G6; qualify it before using it here.")
     endif()
-    # The heap may grow to 3 GiB: with guest cores 1/2 at 192 MiB of code, a large game's
-    # blocks (~0.5 KiB of metadata each) once exhausted 2 GiB. That is its address range, not its
-    # memory: the heap commits 128 MiB pieces as allocations need them (heap_arenas.inc), because
-    # everything the CPU holds comes out of the 12 GiB it shares with the GPU. Taken whole at
-    # start, guest RAM, a dense page table, this heap and the A64 code caches were 8.6 GiB of it.
+    # The heap may grow to 6 GiB: with guest cores 1/2 at 192 MiB of code, a large game's
+    # blocks (~0.5 KiB of metadata each) once exhausted 2 GiB, and Tears of the Kingdom with the
+    # UltraCam mod filled 3 GiB building the mod's RomFS while the console had 8 GiB free
+    # (Swordpdf/ProsperoEden#246). That is its address range, not its memory: the heap commits
+    # 128 MiB pieces as allocations need them (heap_arenas.inc), because everything the CPU holds
+    # comes out of the 12 GiB it shares with the GPU. Taken whole at start, guest RAM, a dense page
+    # table, a 3 GiB heap and the A64 code caches were 8.6 GiB of it; where no range can be
+    # reserved, the heap still takes only 3 GiB at once (EDEN_HEAP_WHOLE_SIZE). The size no longer
+    # fits an unsigned int, so it is a size_t, and so is the one line that prints it.
+    # (The stock wrappers, EDEN_HEAP_ARENAS off, take the heap whole: 3 GiB there.)
+    option(EDEN_HEAP_ARENAS "Per-thread arenas inside the owned heap" ON)
+    set(heap_mib 3072)
+    if(EDEN_HEAP_ARENAS)
+        set(heap_mib 6144)
+    endif()
     file(READ "${heap_source}" heap)
-    string(REPLACE "128 MiB" "3072 MiB" heap "${heap}")
-    string(REPLACE "(128u * 1024u * 1024u)" "(3072u * 1024u * 1024u)" heap "${heap}")
+    string(REPLACE "128 MiB" "${heap_mib} MiB" heap "${heap}")
+    string(REPLACE "(128u * 1024u * 1024u)" "((size_t)${heap_mib} << 20)" heap "${heap}")
+    string(REPLACE "base=%p size=%u\\n" "base=%p size=%zu\\n" heap "${heap}")
     string(REPLACE "#include <sys/mman.h>" "#include <sys/mman.h>\nvoid *eden_heap_pages(size_t);\nvoid eden_heap_pages_free(void *, size_t);" heap "${heap}")
     string(REPLACE "mmap(NULL, PS5_OPENGL_HEAP_SIZE, PROT_READ | PROT_WRITE,\n                    MAP_PRIVATE | MAP_ANON, -1, 0)" "eden_heap_pages(PS5_OPENGL_HEAP_SIZE)" heap "${heap}")
     string(REPLACE "if (base == MAP_FAILED)" "if (base == NULL)" heap "${heap}")
@@ -3012,7 +3117,6 @@ void Initialize() {
     string(REPLACE "\"PS5-OpenGL\"" "\"Eden-headless\"" heap "${heap}")
     # Replace the single-mspace wrappers with per-thread arenas over the same heap
     # (headless/heap_arenas.inc). The shared source above stays pinned/unchanged.
-    option(EDEN_HEAP_ARENAS "Per-thread arenas inside the owned heap" ON)
     if(EDEN_HEAP_ARENAS)
         set(heap_wrappers_begin "static int ps5_heap_ready(void) {")
         set(heap_wrappers_end "void ps5_opengl_heap_stats_print(unsigned iteration) {")

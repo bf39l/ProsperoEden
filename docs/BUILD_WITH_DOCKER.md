@@ -1,8 +1,9 @@
-# Build ProsperoEden Fork with Docker
+# Build ProsperoEden with Docker
 
 Build ProsperoEden for PlayStation 5 on an Apple Silicon Mac using an Ubuntu AMD64 Docker container.
 
-This guide is based on the **`v26.011.018`** branch, which tracks Eden's current master (`d85bad89`).
+This guide covers the **1.000.001** release line, pinned to Eden `d85bad89`.
+For local integration testing, stay on the branch containing the changes you want to build.
 
 The fork preserves the upstream prerelease UI and emulator implementation while adding per-game directory scanning, including support for games with updates and DLC stored in individual folders.
 
@@ -12,7 +13,7 @@ The fork preserves the upstream prerelease UI and emulator implementation while 
 - Docker Desktop with AMD64 emulation enabled (Rosetta where available)
 - Git
 - Sufficient disk space for SDK dependencies, FFmpeg, emulator source, and build artifacts
-- Repository checked out to `v26.011.018`
+- Repository checked out to the release or integration branch you want to build
 
 Repository: https://github.com/bf39l/ProsperoEden
 
@@ -25,7 +26,7 @@ git clone https://github.com/bf39l/ProsperoEden.git
 
 cd ProsperoEden
 
-git switch v26.011.018
+git switch main
 ```
 
 Verify the branch:
@@ -37,7 +38,7 @@ git branch --show-current
 Expected:
 
 ```text
-v26.011.018
+main
 ```
 
 For a completely fresh build, use a fresh clone rather than a working directory containing build artifacts from other branches.
@@ -221,14 +222,14 @@ Since `/workspace/..` resolves to `/`, this refers to the Mihawk dependency chec
 
 Do not create an empty placeholder library or substitute an unrelated SDK archive.
 
-## 7. Build ProsperoEden Fork
+## 7. Build ProsperoEden
 
 Run:
 
 ```bash
 cd /workspace
 
-EDEN_SKIP_SOURCE_CHECKS=1 make JOBS=4
+EDEN_SKIP_SOURCE_CHECKS=1 make release JOBS=4
 ```
 
 ### Build parameters
@@ -239,15 +240,21 @@ Limits build parallelism to four jobs. This can reduce memory pressure when runn
 
 **`EDEN_SKIP_SOURCE_CHECKS=1`**
 
-Skips host-side source checks that failed under AMD64 emulation, particularly the JIT allocator execution checks.
+The documented Apple Silicon Docker workflow skips host-side source checks
+that are incompatible with translated x86 execution. Native Linux CI should leave
+this switch unset. Run supported focused regressions separately.
+
+The JIT allocator check recognizes Docker Desktop's
+`VirtualApple` x86 translation and refreshes executable permissions after a test
+rewrite, while still checking both aliases and the returned result. Native x86
+CI keeps its original live-rewrite path.
 
 **`EDEN_SELF_UPDATE` (default `OFF`)**
 
 The self-update helper (`self-updater.elf`) is not built or shipped by default, because it needs a hosted signed catalog (`homebrew.page`). Set `EDEN_SELF_UPDATE=ON` to build and ship it.
 
-The build still performs its normal compilation, linking, and applicable package validation steps.
-
-However, skipping these checks means the result has not passed the complete upstream validation procedure.
+If you explicitly set `EDEN_SKIP_SOURCE_CHECKS=1`, compilation, linking and package
+validation still run, but the result has not passed the complete source-check suite.
 
 ### Optional AddressSanitizer workaround
 
@@ -266,7 +273,7 @@ This disables leak detection for affected processes; it does not correct memory-
 If a build fails due to a missing dependency, install or prepare the dependency and rerun:
 
 ```bash
-EDEN_SKIP_SOURCE_CHECKS=1 make JOBS=4
+EDEN_SKIP_SOURCE_CHECKS=1 make release JOBS=4
 ```
 
 Ninja and the other build tools should reuse completed artifacts where possible.
@@ -279,7 +286,7 @@ After a successful release build, the expected output structure is:
 
 ```text
 dist/
-├── ProsperoEden-v26.011.018.zip
+├── ProsperoEden-v1.000.001.zip
 └── SHA256SUMS
 
 build/
@@ -305,20 +312,20 @@ First verify the SHA-256 checksums:
 ```bash
 cd /workspace
 
-sha256sum -c dist/SHA256SUMS
+(cd dist && sha256sum -c SHA256SUMS)
 ```
 
 Expected:
 
 ```text
-ProsperoEden-v26.011.018.zip: OK
+ProsperoEden-v1.000.001.zip: OK
 ```
 
 Verify ZIP integrity:
 
 ```bash
 unzip -t \
-  dist/ProsperoEden-v26.011.018.zip | tail -1
+  dist/ProsperoEden-v1.000.001.zip | tail -1
 ```
 
 Expected:
@@ -334,7 +341,7 @@ python3 - <<'PY'
 import json
 from zipfile import ZipFile
 
-archive = "dist/ProsperoEden-v26.011.018.zip"
+archive = "dist/ProsperoEden-v1.000.001.zip"
 
 with ZipFile(archive) as z:
     data = json.loads(
@@ -342,13 +349,13 @@ with ZipFile(archive) as z:
     )
 
 assert data["titleId"] == "PPSA99018"
-assert data["contentVersion"] == "26.011.018"
+assert data["contentVersion"] == "01.000.001"
 assert (
     data["localizedParameters"]["en-US"]["titleName"]
-    == "ProsperoEden Fork"
+    == "ProsperoEden"
 )
 
-print("PASS: Fork metadata verified")
+print("PASS: Application metadata verified")
 PY
 ```
 
@@ -356,7 +363,7 @@ Check the executable in the ZIP:
 
 ```bash
 unzip -l \
-  dist/ProsperoEden-v26.011.018.zip \
+  dist/ProsperoEden-v1.000.001.zip \
   | grep 'PPSA99018/eboot.bin'
 ```
 
@@ -399,7 +406,7 @@ Inside Docker:
 ```bash
 cd /workspace
 
-EDEN_SKIP_SOURCE_CHECKS=1 make JOBS=4
+EDEN_SKIP_SOURCE_CHECKS=1 make release JOBS=4
 ```
 
 The Docker volume retains `/root/.cache`, while the stopped container retains other files created inside it.
@@ -507,7 +514,7 @@ Then:
 
 ```bash
 cd /workspace
-EDEN_SKIP_SOURCE_CHECKS=1 make JOBS=4
+EDEN_SKIP_SOURCE_CHECKS=1 make release JOBS=4
 ```
 
 ### SparseLargeVector: missing mirror_index
@@ -582,9 +589,9 @@ Test on PS5 hardware before treating the build as stable.
 | Branch | `v26.011.018` |
 | Upstream | Eden master (`d85bad89`) |
 | PS5 title ID | `PPSA99018` |
-| Content version | `26.011.018` |
-| Display name | `ProsperoEden Fork` |
-| Release archive | `ProsperoEden-v26.011.018.zip` |
+| Content version | `01.000.001` |
+| Display name | `ProsperoEden` |
+| Release archive | `ProsperoEden-v1.000.001.zip` |
 | Docker platform | `linux/amd64` |
 | Docker base image | `ubuntu:26.04` |
 

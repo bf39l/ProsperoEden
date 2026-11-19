@@ -40,6 +40,8 @@ extern "C" void eden_jit_path_counters(unsigned core, unsigned long long* out) _
 namespace Common {
 // Address space Eden's sparse tables span and the memory they hold (src/memory_pages.cpp).
 void SparseUsage(std::size_t* reserved, std::size_t* committed) noexcept;
+// The span of the guest's memory and the memory behind it (src/memory_pages.cpp).
+void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 } // namespace Common
 
 namespace Eden::Performance {
@@ -289,14 +291,34 @@ void CheckWorkerTopology() {
         worker_topology_ready, count, worker_cpus[0], worker_cpus[1], worker_cpus[2], worker_cpus[3], worker_cpus[4],
         static_cast<int>(measured));
 }
+thread_local bool pipeline_builder = false;      // this thread builds pipelines
+thread_local bool pipeline_builder_settled = false; // and is on the spare CPUs
 void PlaceSecondary(const char* name) {
     if (!placement_secondary.load(std::memory_order_relaxed) || !secondary_cpus) return;
+    const bool builder = std::strcmp(name, "VkPipelineBuilder") == 0;
+    if (builder) pipeline_builder = true;
+    if (builder && pipeline_startup.load(std::memory_order_acquire) && topology_allowed_valid) {
+        // Every CPU the app has, while the cache is built before the guest runs.
+        const int result = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &topology_allowed);
+        unsigned long long all = 0;
+        for (unsigned cpu = 0; cpu < 64; ++cpu)
+            if (CPU_ISSET(cpu, &topology_allowed)) all |= 1ULL << cpu;
+        if (secondary_reports.fetch_add(1, std::memory_order_relaxed) < 64)
+            std::printf("EDEN_WORKER_PLACED name=%s mask=%llx error=%d startup=1\n", name, all, result ? errno : 0);
+        if (result == 0) return;
+    }
+    if (builder) pipeline_builder_settled = true;
     cpuset_t mask{};
     for (unsigned cpu = 0; cpu < 64; ++cpu)
         if (secondary_cpus & (1ULL << cpu)) CPU_SET(cpu, &mask);
     const int result = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &mask);
     if (secondary_reports.fetch_add(1, std::memory_order_relaxed) < 64)
         std::printf("EDEN_WORKER_PLACED name=%s mask=%llx error=%d\n", name, secondary_cpus, result ? errno : 0);
+}
+void SettlePipelineBuilderImpl() {
+    if (!pipeline_builder || pipeline_builder_settled || pipeline_startup.load(std::memory_order_acquire)) return;
+    PlaceSecondary("VkPipelineBuilder");
+    pipeline_builder_settled = true;
 }
 void PinWorker(unsigned index, cpuset_t& affinity) {
     if (!worker_topology_ready || index >= worker_cpus.size() ||
@@ -331,6 +353,8 @@ struct CpuSample {
     unsigned long long thread = 0, pc = 0;
     unsigned svc = ~0u, fpcr = 0;
     unsigned long long compilations = 0, compile_ns = 0;
+    // The core's idle polling so far (IdleSpinNs), read with cpu_ns so the two stay in step.
+    unsigned long long idle_spin_ns = 0;
 };
 std::array<CpuSample, 4> cpu_samples;
 // Read/written only by the worker owning this core; samples use workers_mutex.
@@ -452,6 +476,15 @@ extern "C" void ps5_opengl_heap_snapshot(const char* phase, unsigned iteration);
 extern "C" unsigned eden_heap_arenas_created(void) __attribute__((weak));
 extern "C" std::size_t eden_heap_committed(void) __attribute__((weak));
 extern "C" std::size_t eden_heap_large_held(unsigned* blocks) __attribute__((weak));
+extern "C" std::size_t eden_heap_trim(void) __attribute__((weak));
+extern "C" std::size_t eden_heap_trim_level(int holes) __attribute__((weak));
+extern "C" std::size_t eden_heap_arena_usage(unsigned* count) __attribute__((weak));
+extern "C" std::size_t eden_heap_hole_usage(unsigned* count) __attribute__((weak));
+extern "C" void eden_heap_usage(std::size_t* held, std::size_t* in_use, std::size_t* returned) __attribute__((weak));
+extern "C" unsigned eden_guest_memory_wanted(void) __attribute__((weak));
+extern "C" void eden_guest_memory_waits(unsigned long long* won, unsigned long long* lost,
+                                        unsigned long long* refused) __attribute__((weak));
+extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) __attribute__((weak));
 #ifdef PS5_NATIVE
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
 extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*,
@@ -464,7 +497,20 @@ extern "C" std::int32_t sceKernelDirectMemoryQuery(std::int64_t, int, DirectMemo
 #ifdef PS5_NATIVE
 // The largest free block of direct memory is what the next graphics allocation needs. Looked at
 // again every 100 ms; called on the GPU thread by the texture collector (KeepDirtyTextures).
+//
+// The guest's memory is taken only where it writes (src/guest_memory_service.inc), and a large
+// open-world game wrote 0.5 to 1.8 GB of it within seconds while it streamed in the textures of
+// the same new area: both went for the pool at once, the caches free at the end of a frame, and
+// the guest's next write found 1 MiB left (Tears of the Kingdom, 23 and 79 minutes in). So the
+// guest has 1 GiB of headroom (performance.h kGuestReserve), which the memory service holds as
+// blocks of its own; the caches see the pool less what of it is not held yet, and give memory
+// back as soon as a burst of writes has taken half of it (performance.h ViewOfPool). The guest's
+// writes take blocks from the headroom when the pool has none (and wait for the caches when even
+// that is gone).
 static std::atomic<unsigned long long> largest_free_block{0};
+// What the caches see as free (memory_budget.h CachesFree): the pool's and the graphics allocator's
+// unused block space.
+static std::atomic<unsigned long long> caches_free_bytes{0};
 static void RefreshFreeMemory() {
     static std::atomic<long long> checked_ns{0};
     const long long now = NowNs();
@@ -475,21 +521,69 @@ static void RefreshFreeMemory() {
     std::size_t largest = 0;
     const std::int64_t total = sceKernelGetDirectMemorySize();
     const bool known = total > 0 && sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) == 0;
-    largest_free_block.store(known ? largest : 0, std::memory_order_relaxed);
-    graphics_memory_short.store(!known || largest < kShortMemory, std::memory_order_relaxed);
+    std::size_t held = 0, target = 0;
+    if (eden_guest_memory_reserve) eden_guest_memory_reserve(&held, &target);
+    const PoolView view = ViewOfPool(known, largest, held, target);
+    largest_free_block.store(known ? (view.free != 0 ? view.free : 1) : 0, std::memory_order_relaxed);
+    graphics_memory_short.store(view.short_memory, std::memory_order_relaxed);
+    const auto held_hook = graphics_memory_held.load(std::memory_order_acquire);
+    const auto used_hook = graphics_memory_used.load(std::memory_order_acquire);
+    const unsigned long long blocks = held_hook ? held_hook() : 0, used = used_hook ? used_hook() : 0;
+    const std::size_t caches =
+        CachesFree(view.free, blocks, used, CachesFloor(graphics_largest_image.load(std::memory_order_relaxed)));
+    caches_free_bytes.store(known ? (caches != 0 ? caches : 1) : 0, std::memory_order_relaxed);
+    graphics_caches_short.store(!known || CachesShort(caches), std::memory_order_relaxed);
+    // While the pool is short, what nothing uses goes back to it (every 2 s at most): the idle
+    // staging buffers and the heap's free memory, before the caches give textures back.
+    static std::atomic<long long> relieved_ns{0};
+    if (view.short_memory && now - relieved_ns.load(std::memory_order_relaxed) >= 2'000'000'000) {
+        relieved_ns.store(now, std::memory_order_relaxed);
+        RelieveMemory("the pool is short");
+    }
+}
+// A write to the guest's memory waiting for a block (src/guest_memory_service.inc, WaitForBlock):
+// the game's own memory comes first, so while one waits the caches see memory short and none free,
+// and the texture collector evicts at its hardest until the write has its block.
+static bool GuestMemoryWanted() {
+    return eden_guest_memory_wanted && eden_guest_memory_wanted() != 0;
 }
 static bool GraphicsMemoryShort() {
+    if (GuestMemoryWanted()) {
+        graphics_caches_short.store(true, std::memory_order_relaxed);
+        // A write of the game's waits for a block: what nothing uses goes back at once (every 2 s at
+        // most), the pages of the heap's free runs with it.
+        static std::atomic<long long> wanted_ns{0};
+        const long long now = NowNs();
+        if (now - wanted_ns.load(std::memory_order_relaxed) >= 2'000'000'000) {
+            wanted_ns.store(now, std::memory_order_relaxed);
+            RelieveMemory("a write of the game's waits for memory", true);
+        }
+        return true;
+    }
     RefreshFreeMemory();
     return graphics_memory_short.load(std::memory_order_relaxed);
 }
-// What the caches' "memory in use" is measured against (performance.h, graphics_memory_free).
+// The pool's largest free block, less the guest's headroom not held yet (performance.h,
+// graphics_memory_free): what the next block of graphics memory can be given.
 static unsigned long long GraphicsMemoryFree() {
+    if (GuestMemoryWanted()) return 1; // not 0: the caches read 0 as "not known"
     RefreshFreeMemory();
     return largest_free_block.load(std::memory_order_relaxed);
 }
+// What the caches' "memory in use" is measured against (performance.h, graphics_caches_free).
+static unsigned long long GraphicsCachesFree() {
+    if (GuestMemoryWanted()) return 1;
+    RefreshFreeMemory();
+    return caches_free_bytes.load(std::memory_order_relaxed);
+}
+// Pipeline builders (performance.h PipelineWorkers): the console's eight cores run the guest's
+// cores and the GPU thread too, but at start, while the cache is built, they are free.
+[[maybe_unused]] static const bool pipeline_workers_set =
+    (pipeline_workers_min.store(6, std::memory_order_relaxed), true);
 [[maybe_unused]] static const bool graphics_memory_probe_installed =
     (graphics_memory_probe.store(&GraphicsMemoryShort, std::memory_order_relaxed),
-     graphics_memory_free.store(&GraphicsMemoryFree, std::memory_order_relaxed), true);
+     graphics_memory_free.store(&GraphicsMemoryFree, std::memory_order_relaxed),
+     graphics_caches_free.store(&GraphicsCachesFree, std::memory_order_relaxed), true);
 #endif
 
 namespace {
@@ -570,7 +664,10 @@ void GuestCoreLoads(unsigned loads[4]) {
     // writes its own when it next leaves the guest's code after being asked (SampleCpu); here
     // the last two readings of a core are set against the time between them. A core that wrote
     // nothing since the last look was asleep, which is no load; when it wakes, its next reading
-    // covers the whole stretch.
+    // covers the whole stretch. The time the core spent polling its interrupt flag while idle
+    // (PhysicalCore::Idle) is CPU time spent waiting, not working, and is left out: a game that
+    // waits ~13,000 times a second for ~27 us each (Kirby and the Forgotten Land's main thread,
+    // Swordpdf/ProsperoEden#275) kept its core polling and read 95-97% busy at ~60% work.
     struct Core {
         long long mono = 0, cpu = 0;
         unsigned shown = ~0u;
@@ -592,12 +689,13 @@ void GuestCoreLoads(unsigned loads[4]) {
                 core = {};
             } else if (core.mono == 0) {
                 core.mono = sample.mono_ns;
-                core.cpu = sample.cpu_ns;
+                core.cpu = sample.cpu_ns - static_cast<long long>(sample.idle_spin_ns);
             } else if (sample.mono_ns > core.mono) {
-                core.shown = Percent(static_cast<double>(sample.cpu_ns - core.cpu) /
+                const long long busy = sample.cpu_ns - static_cast<long long>(sample.idle_spin_ns);
+                core.shown = Percent(static_cast<double>(busy - core.cpu) /
                                      static_cast<double>(sample.mono_ns - core.mono));
                 core.mono = sample.mono_ns;
-                core.cpu = sample.cpu_ns;
+                core.cpu = busy;
             } else if (core.shown != ~0u) {
                 core.shown = 0;
             }
@@ -683,7 +781,141 @@ void RecordHle(const char* service, unsigned command, long long ns) {
     entry.second += static_cast<unsigned long long>(ns > 0 ? ns : 0);
 }
 
+void HeapUsage(unsigned long long* held, unsigned long long* in_use) {
+    std::size_t h = 0, u = 0;
+    if (eden_heap_usage) eden_heap_usage(&h, &u, nullptr);
+    if (held) *held = h;
+    if (in_use) *in_use = u;
+}
+
+// The heap's line in stderr.log: what it holds of the pool (pieces, arena slots and large blocks),
+// what of that its blocks use, its holes, and what it has given back. `why` says when.
+void ReportHeap(const char* why) {
+    if (!eden_heap_usage) return;
+    std::size_t held = 0, in_use = 0, returned = 0;
+    eden_heap_usage(&held, &in_use, &returned);
+    unsigned large_blocks = 0, arenas = 0, holes = 0;
+    const std::size_t large = eden_heap_large_held ? eden_heap_large_held(&large_blocks) : 0;
+    const std::size_t arena_bytes = eden_heap_arena_usage ? eden_heap_arena_usage(&arenas) : 0;
+    const std::size_t hole_bytes = eden_heap_hole_usage ? eden_heap_hole_usage(&holes) : 0;
+    const std::size_t pieces = held > large + arena_bytes ? held - large - arena_bytes : 0;
+    std::fprintf(stderr, "[ProsperoEden] heap: holds %zu MiB (%zu MiB of pieces, %zu MiB in %u arenas, %zu MiB in %u "
+                         "large blocks), %zu MiB of it in use; %zu MiB of free runs given back as holes; %zu MiB "
+                         "given back so far (%s)\n",
+                 held >> 20, pieces >> 20, arena_bytes >> 20, arenas, large >> 20, large_blocks, in_use >> 20,
+                 hole_bytes >> 20, returned >> 20, why);
+}
+
+std::size_t TrimHeap(const char* why, bool holes) {
+    std::size_t returned = 0;
+    if (eden_heap_trim_level) {
+        returned = eden_heap_trim_level(holes ? 1 : 0);
+    } else if (eden_heap_trim) {
+        returned = eden_heap_trim();
+    }
+    if (returned != 0) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "gave back %zu MiB: %s", returned >> 20, why);
+        ReportHeap(text);
+    }
+    return returned;
+}
+
+#ifdef PS5_NATIVE
+// The pool's free memory, how many runs it is in, and its three largest runs (bytes), for the
+// pressure line. Walks the allocated regions (sceKernelDirectMemoryQuery, a system call each), at
+// most kPoolRunsWalk of them: *read_all says whether it got to the end of the pool (if not, the
+// free memory and runs are those below where it stopped). False when it cannot read the pool.
+static constexpr unsigned kPoolRunsWalk = 1024;
+static bool PoolRuns(unsigned long long* free_bytes, unsigned* runs, unsigned long long largest[3], bool* read_all) {
+    const std::int64_t total = sceKernelGetDirectMemorySize();
+    if (total <= 0) return false;
+    std::int64_t offset = 0, taken = 0;
+    unsigned regions = 0;
+    *runs = 0;
+    largest[0] = largest[1] = largest[2] = 0;
+    const auto run = [&](std::int64_t bytes) {
+        if (bytes <= 0) return;
+        ++*runs;
+        const auto size = static_cast<unsigned long long>(bytes);
+        if (size > largest[0]) {
+            largest[2] = largest[1];
+            largest[1] = largest[0];
+            largest[0] = size;
+        } else if (size > largest[1]) {
+            largest[2] = largest[1];
+            largest[1] = size;
+        } else if (size > largest[2]) {
+            largest[2] = size;
+        }
+    };
+    DirectMemoryRegion region{};
+    bool ended = false;
+    while (offset < total && regions < kPoolRunsWalk) {
+        if (sceKernelDirectMemoryQuery(offset, 1, &region, sizeof(region)) != 0 || region.end <= offset ||
+            region.start < 0 || region.end > total || region.start >= region.end) {
+            ended = true;  // nothing allocated past here
+            break;
+        }
+        run(region.start - offset);
+        taken += region.end - region.start;
+        offset = region.end;
+        ++regions;
+    }
+    if (regions == 0) return false;
+    *read_all = ended || offset >= total;
+    if (*read_all) {
+        run(total - offset);
+        *free_bytes = static_cast<unsigned long long>(total - taken);
+    } else {
+        *free_bytes = static_cast<unsigned long long>(offset - taken);
+    }
+    return true;
+}
+#endif
+
+unsigned long long RelieveMemory(const char* why, bool urgent) {
+    unsigned long long staging = 0;
+    if (const auto release = graphics_staging_release.load(std::memory_order_acquire)) staging = release();
+    const std::size_t heap = TrimHeap(why, urgent);
+    // Said when a shortage starts (no relief in the 10 s before), once a minute while it lasts, and
+    // when memory is wanted at once (every 10 s at most): each line reads the pool's regions, a
+    // system call each, on the GPU thread, and a shortage asks for relief every 2 s.
+    static std::atomic<long long> said_ns{0}, relieved_ns{0};
+    const long long now = NowNs(), since = now - said_ns.load(std::memory_order_relaxed);
+    const long long quiet = now - relieved_ns.exchange(now, std::memory_order_relaxed);
+    if ((urgent && since >= 10'000'000'000) || quiet >= 10'000'000'000 || since >= 60'000'000'000) {
+        said_ns.store(now, std::memory_order_relaxed);
+        const auto held_hook = graphics_memory_held.load(std::memory_order_acquire);
+        const auto used_hook = graphics_memory_used.load(std::memory_order_acquire);
+        const auto free_hook = graphics_memory_free.load(std::memory_order_relaxed);
+        unsigned long long free_bytes = 0, largest[3] = {0, 0, 0};
+        unsigned runs = 0;
+        bool walked = false, read_all = true;
+#ifdef PS5_NATIVE
+        walked = PoolRuns(&free_bytes, &runs, largest, &read_all);
+#endif
+        char pool[192] = "";
+        if (walked)
+            std::snprintf(pool, sizeof(pool), "the pool has %llu MiB free in %u runs%s, the largest %llu, %llu and %llu MiB",
+                          free_bytes >> 20, runs, read_all ? "" : " below its first 1024 regions",
+                          largest[0] >> 20, largest[1] >> 20, largest[2] >> 20);
+        else
+            std::snprintf(pool, sizeof(pool), "the pool's largest free block is %llu MiB",
+                          free_hook ? free_hook() >> 20 : 0ULL);
+        std::fprintf(stderr, "[ProsperoEden] memory pressure (%s): gave back %llu MiB of idle staging buffers and "
+                             "%zu MiB of the heap; %s; the graphics allocator holds %llu MiB in blocks, %llu MiB of "
+                             "it in use\n",
+                     why, staging >> 20, heap >> 20, pool, held_hook ? held_hook() >> 20 : 0ULL,
+                     used_hook ? used_hook() >> 20 : 0ULL);
+    }
+    return staging + heap;
+}
+
 void ReportSessionMemory(const char* phase, unsigned session) {
+    // The caches' floor is a session's (memory_budget.h CachesFloor): a game's largest image is not
+    // the next game's.
+    if (std::strcmp(phase, "start") == 0) graphics_largest_image.store(0, std::memory_order_relaxed);
     unsigned large_blocks = 0;
     const std::size_t large = eden_heap_large_held ? eden_heap_large_held(&large_blocks) : 0;
     std::size_t table_span = 0, table_held = 0;
@@ -711,6 +943,60 @@ void ReportSessionMemory(const char* phase, unsigned session) {
                 phase, session, total, free_bytes, largest, regions,
                 eden_heap_committed ? eden_heap_committed() : std::size_t{0}, large, large_blocks, table_held);
     std::fflush(stdout);
+    char why[64];
+    std::snprintf(why, sizeof(why), "session %s", phase);
+    ReportHeap(why);
+}
+
+// Every 5 s of frames, in every build: who holds the pool when a long session runs out of it. The
+// guest's memory, the heap's pieces and large blocks, Eden's tables and the graphics allocator,
+// against the largest block left; and how the guest's writes that had to wait for a block ended.
+void ReportMemory() {
+    std::size_t span = 0, guest = 0, table_span = 0, tables = 0;
+    ::Common::GuestMemoryUsage(&span, &guest);
+    ::Common::SparseUsage(&table_span, &tables);
+    unsigned large_blocks = 0;
+    const std::size_t large = eden_heap_large_held ? eden_heap_large_held(&large_blocks) : 0;
+    const auto held = graphics_memory_held.load(std::memory_order_acquire);
+    unsigned long long won = 0, lost = 0, refused = 0;
+    if (eden_guest_memory_waits) eden_guest_memory_waits(&won, &lost, &refused);
+    unsigned long long free_bytes = 0, total = 0;
+    MemoryPool(&free_bytes, &total);
+    std::size_t largest = 0;
+#ifdef PS5_NATIVE
+    if (total != 0) {
+        std::int64_t start = 0;
+        (void)sceKernelAvailableDirectMemorySize(0, static_cast<std::int64_t>(total), 0x4000, &start, &largest);
+    }
+#endif
+    std::size_t reserve = 0, reserve_target = 0;
+    if (eden_guest_memory_reserve) eden_guest_memory_reserve(&reserve, &reserve_target);
+    std::size_t heap_used = 0, heap_returned = 0;
+    if (eden_heap_usage) eden_heap_usage(nullptr, &heap_used, &heap_returned);
+    unsigned arenas = 0, holes = 0;
+    const std::size_t arena_bytes = eden_heap_arena_usage ? eden_heap_arena_usage(&arenas) : 0;
+    const std::size_t hole_bytes = eden_heap_hole_usage ? eden_heap_hole_usage(&holes) : 0;
+    const auto used = graphics_memory_used.load(std::memory_order_acquire);
+    const auto caches = graphics_caches_free.load(std::memory_order_relaxed);
+    std::printf("EDEN_MEMORY guest=%zuMiB heap=%zuMiB large=%zuMiB/%u tables=%zuMiB graphics=%lluMiB "
+                "free=%lluMiB largest_free=%zuMiB short=%d waits_won=%llu waits_lost=%llu refused=%llu "
+                "reserve=%zuMiB/%zuMiB heap_used=%zuMiB heap_returned=%zuMiB heap_arenas=%zuMiB/%u "
+                "heap_holes=%zuMiB graphics_used=%lluMiB caches_free=%lluMiB caches_short=%d\n",
+                guest >> 20, (eden_heap_committed ? eden_heap_committed() : std::size_t{0}) >> 20, large >> 20,
+                large_blocks, tables >> 20, held ? held() >> 20 : 0ULL, free_bytes >> 20, largest >> 20,
+                int(graphics_memory_short.load(std::memory_order_relaxed)), won, lost, refused, reserve >> 20,
+                reserve_target >> 20, heap_used >> 20, heap_returned >> 20, arena_bytes >> 20, arenas,
+                hole_bytes >> 20, used ? used() >> 20 : 0ULL, caches ? caches() >> 20 : 0ULL,
+                int(graphics_caches_short.load(std::memory_order_relaxed)));
+    static unsigned reports = 0;
+    if (++reports % 6 == 0) {
+        // Every 30 s the heap gives back its empty pieces and arenas: memory in runs of 8 MiB or
+        // more. The pages of its free runs go back only when memory is wanted at once
+        // (RelieveMemory, urgent): made at every shortage, those holes kept the heap growing past
+        // its own free runs (tools/check-memory-soak.py).
+        TrimHeap("every 30 s", false);
+        ReportHeap("every 30 s");
+    }
 }
 
 void ReportGpuThread(unsigned frame) {
@@ -1061,6 +1347,7 @@ void SampleCoreCpu(unsigned core) {
     sample.epoch = epoch;
     sample.mono_ns = ClockNs(CLOCK_MONOTONIC);
     sample.cpu_ns = owner_cpu_clock_valid ? ClockNs(CLOCK_THREAD_CPUTIME_ID) : -ENOTSUP;
+    sample.idle_spin_ns = IdleSpinNs(core);
     std::lock_guard lock(workers_mutex);
     cpu_samples[core] = sample;
 }
@@ -1072,7 +1359,7 @@ void SampleCpu(unsigned core, unsigned long long thread, unsigned long long pc, 
     const CpuSample sample{epoch, ClockNs(CLOCK_MONOTONIC),
         owner_cpu_clock_valid ? ClockNs(CLOCK_THREAD_CPUTIME_ID) : -ENOTSUP, thread, pc, svc, fpcr,
         compilation[core].calls.load(std::memory_order_relaxed),
-        compilation[core].nanoseconds.load(std::memory_order_relaxed)};
+        compilation[core].nanoseconds.load(std::memory_order_relaxed), IdleSpinNs(core)};
     std::lock_guard lock(workers_mutex);
     cpu_samples[core] = sample;
 }
@@ -1414,6 +1701,14 @@ void PlatformChecks() {
     }
     std::fflush(stdout);
 }
+// performance.h SettlePipelineBuilder: a pipeline builder placed on every CPU while the shader
+// cache was built goes back to the spare CPUs once the game runs. Other threads are untouched.
+void SettlePipelineBuilder() {
+#ifdef PS5_NATIVE
+    SettlePipelineBuilderImpl();
+#endif
+}
+
 } // namespace Eden::Performance
 
 // dynarmic A64 hooks (weak there): whole-cache evacuations and block compilation time.

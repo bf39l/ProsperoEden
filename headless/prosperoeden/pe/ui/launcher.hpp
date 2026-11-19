@@ -194,7 +194,11 @@ class Launcher
     // ---- library and game settings (library.cpp) ----
     // The game list is read beside the menu: reading every game takes a moment.
     void start_scan();
+    void maybe_start_initial_scan(float dt);
+    bool home_frame_presented_ = false;
     bool initial_scan_requested_ = false;
+    float initial_scan_retry_wait_ = 0.0f;
+    std::string pending_home_settings_;
     bool library_opened_ = false;
     void finish_scan();
     void apply_games(std::vector<Game> games);

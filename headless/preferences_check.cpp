@@ -187,6 +187,13 @@ int main() {
 
     // Console mode per title.
     constexpr uint64_t racer = 0x0100000000010000, quest = 0x0100000000030000;
+    assert(!Eden::LoadAdaptiveClock(0, file) && !Eden::LoadAdaptiveClock(quest, file));
+    {
+        auto document = Eden::Settings::Load(file);
+        document["games"]["0100000000030000"]["adaptive_clock"] = true;
+        assert(Eden::Settings::Write(document, file));
+        assert(Eden::LoadAdaptiveClock(quest, file) && !Eden::LoadAdaptiveClock(racer, file));
+    }
     assert(Eden::LoadGameDocked(racer, file) && Eden::LoadGameDocked(quest, file));
     assert(Eden::SaveGameDocked(racer, false, file));
     assert(!Eden::LoadGameDocked(racer, file) && Eden::LoadGameDocked(quest, file));
@@ -397,6 +404,19 @@ int main() {
     assert(!Eden::SaveGameSettings(racer, game, file));
     game.frame_gen_multiplier = -1;
     assert(Eden::SaveGameSettings(racer, game, file));
+
+    // Background cache loading is independent of existing positional performance flags.
+    const std::string shader_settings = std::string(directory) + "/shader-start.json";
+    assert(Eden::LoadPerformance(racer, shader_settings).background_shader_cache);
+    std::ofstream(shader_settings) << R"({"performance":{"background_shader_cache":false},
+      "games":{"0100000000010000":{"performance":{"background_shader_cache":true}}}})";
+    assert(Eden::LoadPerformance(racer, shader_settings).background_shader_cache);
+    assert(!Eden::LoadPerformance(quest, shader_settings).background_shader_cache);
+    auto shader_speed = Eden::LoadPerformance(quest, shader_settings);
+    shader_speed.fast_gpu = true;
+    assert(Eden::SavePerformance(quest, shader_speed, shader_settings));
+    assert(!Eden::LoadPerformance(quest, shader_settings).background_shader_cache);
+    assert(Eden::LoadPerformance(quest, shader_settings).fast_gpu);
 
     // Performance ("performance", and one per title): the block list and the trade-offs off
     // unless chosen. A title's own values go before the general ones, one value at a time.

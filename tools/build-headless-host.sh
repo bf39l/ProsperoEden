@@ -33,6 +33,8 @@ PY
 fi
 printf '%s\n' 'd85bad89248fcae68f812d7e1c937436261404cb' > "$eden/GIT-COMMIT"
 printf '%s\n' 'ps5-headless' > "$eden/GIT-REFSPEC"
+python3 -B tools/check-eden-patches.py
+python3 -B tools/apply-eden-patches.py "$eden" ".deps/eden-d85bad89.tar.gz"
 # FFmpeg links configure probes through the compiler driver, not raw ld.
 # Keep the derivative in our cache and regenerate its Makefile when it changes.
 python3 - "$eden" "$scratch/build" <<'PY'
@@ -69,9 +71,13 @@ python3 -B "$root/headless/check_slab_lifetime.py" \
 cmake --build "$scratch/build" --target eden-headless eden-romfs-check eden-devices-check eden-scalar-check eden-memory-check eden-ryujinx-check eden-mods-check eden-shader-cache-check eden-settings-check eden-patch-library-check eden-update-check eden-update-files-check eden-profiles-check eden-save-sync-check -j 6
 python3 -B "$root/tools/check-sparse-header.py" "$scratch/build"
 python3 -B "$root/tools/check-multiplayer-headers.py" "$scratch/build"
+python3 -B "$root/tools/check-audio-queue.py" "$scratch/build/headless/sink_stream.cpp" "$scratch/source/src"
 python3 -B "$root/tools/check-heap-growth.py"
 python3 -B "$root/tools/check-crash-report.py"
 python3 -B "$root/tools/check-guest-fault-recovery.py"
+python3 -B "$root/tools/check-guest-span.py"
+python3 -B "$root/tools/check-indexed-storage-images.py"
+python3 -B "$root/tools/check-dma-fill.py"
 python3 -B "$root/tools/check-stop-limit.py"
 python3 -B "$root/tools/check-image-pages.py"
 python3 -B "$root/tools/check-astc-policy.py"
