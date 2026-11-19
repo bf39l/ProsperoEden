@@ -444,6 +444,14 @@ bool HandleGuestWriteFault(void* fault) noexcept {
         ok = PromoteShared(*range, slot);
     }
     UnlockSlot(*range, slot, ok ? SlotOwn : state);
+    // A successful promotion resolves this fault. Clearing or reclaiming the same
+    // slot later can legitimately fault at the very same address again; those
+    // separate recoveries must not accumulate toward the stuck-fault limit.
+    // Leave the limit intact when an already writable slot makes no progress.
+    if (ok && state != SlotOwn) {
+        last = 0;
+        repeats = 0;
+    }
     if (!ok) {
         counters.failures.fetch_add(1, std::memory_order_relaxed);
         Note("EDEN_CRAM out of memory: a written slot of the guest's memory found no block\n");
