@@ -2,6 +2,7 @@
 // text files. Build: c++ -std=c++20 -I<nlohmann include> preferences_check.cpp && ./a.out
 #include "game_name.h"
 #include "preferences.h"
+#include "recent_games.h"
 #include <cassert>
 #include <fstream>
 #include <filesystem>
@@ -135,6 +136,54 @@ int main() {
     for (int i = 0; i < 5; ++i) assert(Eden::SaveRecentGame("Game" + std::to_string(i) + ".nsp", file));
     assert((Eden::LoadRecentGames(file) == std::vector<std::string>{"Game4.nsp", "Game3.nsp", "Game2.nsp", "Game1.nsp",
                                                                     "Game0.nsp", "Sample Quest.nsp", "Demo Racer.xci"}));
+
+    // Launch history uses the Library's relative path, including the game folder.
+    constexpr std::string_view roms = "/data/SwitchGames/roms/";
+    const auto nested_nsp = Eden::RomHistoryPath("/data/SwitchGames/roms/Quest [0100]/Game.nsp", roms);
+    const auto nested_xci = Eden::RomHistoryPath("/data/SwitchGames/roms/Racer/Game.xci", roms);
+    assert(nested_nsp == "Quest [0100]/Game.nsp" && nested_xci == "Racer/Game.xci");
+    assert(Eden::RomHistoryPath("/data/SwitchGames/roms/Game.nsp", roms) == "Game.nsp");
+    assert(Eden::RomHistoryPath("/data/SwitchGames/roms/Game.nsp", "/data/SwitchGames/roms") == "Game.nsp");
+    for (const char* outside : {"/data/SwitchGames/roms-copy/Game.nsp", "/elsewhere/Game.nsp",
+                               "/data/SwitchGames/roms/../Game.nsp", "/data/SwitchGames/roms/A/B/Game.nsp",
+                               "/data/SwitchGames/roms/", "/data/SwitchGames/roms//Game.nsp"})
+        assert(Eden::RomHistoryPath(outside, roms).empty());
+    assert(Eden::RomHistoryPath("/Game.nsp", "").empty());
+    assert(Eden::SaveLastGame(nested_nsp, file) && Eden::LoadLastGame(file) == nested_nsp);
+    assert(Eden::SaveRecentGame(nested_nsp, file));
+    assert(Eden::SaveRecentGame(nested_xci, file));
+    // Equal basenames in different game folders are different history entries.
+    const auto other_nsp = Eden::RomHistoryPath("/data/SwitchGames/roms/Other/Game.nsp", roms);
+    assert(Eden::SaveRecentGame(other_nsp, file));
+    assert(Eden::SaveRecentGame(nested_nsp, file));
+    const auto history = Eden::LoadRecentGames(file);
+    assert(history[0] == nested_nsp && history[1] == other_nsp && history[2] == nested_xci);
+    assert(std::count(history.begin(), history.end(), nested_nsp) == 1 && history.size() == 8);
+
+    // A deleted recent game is ignored; resume falls back to the next available one.
+    const auto history_root = std::filesystem::path(directory) / "roms";
+    std::filesystem::create_directories(history_root / "Quest [0100]");
+    std::filesystem::create_directories(history_root / "Racer");
+    std::filesystem::create_directories(history_root / "Other");
+    std::ofstream(history_root / nested_nsp) << "test ROM";
+    std::ofstream(history_root / nested_xci) << "test ROM";
+    std::ofstream(history_root / other_nsp) << "test ROM";
+    auto available = Eden::ExistingGameHistory(history_root.string(), nested_nsp, history);
+    assert(available.last == nested_nsp && available.recent.size() == 3);
+    std::filesystem::remove(history_root / nested_nsp);
+    available = Eden::ExistingGameHistory(history_root.string(), nested_nsp, history);
+    assert(available.last == other_nsp);
+    assert((available.recent == std::vector<std::string>{other_nsp, nested_xci}));
+    // A directory with the old ROM's name is not playable, either.
+    std::filesystem::create_directory(history_root / nested_nsp);
+    available = Eden::ExistingGameHistory(history_root.string(), nested_nsp, history);
+    assert(available.last == other_nsp && available.recent.size() == 2);
+    std::filesystem::remove_all(history_root);
+    available = Eden::ExistingGameHistory(history_root.string(), nested_nsp, history);
+    assert(available.last.empty() && available.recent.empty());
+    // Filtering does not rewrite a user's history when a drive is missing.
+    assert(Eden::LoadLastGame(file) == nested_nsp && Eden::LoadRecentGames(file) == history);
+    assert(Eden::SaveLastGame("Sample Quest [id].nsp", file));
 
     // Console mode per title.
     constexpr uint64_t racer = 0x0100000000010000, quest = 0x0100000000030000;

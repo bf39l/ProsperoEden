@@ -1644,11 +1644,13 @@ int main(int argc, char** argv) {
                 }
 #ifdef PS5_NATIVE
                 if (game) {
-                    const auto filename = std::filesystem::path(guest).filename().string();
-                    const bool saved_last = Eden::SaveLastGame(filename);
-                    const bool saved_recent = Eden::SaveRecentGame(filename);
-                    if (!saved_last || !saved_recent)
-                        Eden::Report("history", "Could not save recent game");
+                    const auto history_path = Eden::RomHistoryPath(guest, Eden::AssetsPath("roms/"));
+                    if (!history_path.empty()) {
+                        const bool saved_last = Eden::SaveLastGame(history_path);
+                        const bool saved_recent = Eden::SaveRecentGame(history_path);
+                        if (!saved_last || !saved_recent)
+                            Eden::Report("history", "Could not save recent game");
+                    }
                 }
 #endif
                 passed(game ? "game_loaded" : "nro_loaded");
