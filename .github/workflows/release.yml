@@ -128,7 +128,9 @@ jobs:
           key: downloads-${{ hashFiles('tools/deps.json') }}
 
       - name: Fetch dependencies
-        run: make deps
+        run: |
+          python3 -B tools/check-dependency-seeds.py
+          make deps
 
       # After `make deps`: a restored RADV folder would otherwise stand in for the git checkout
       # it lives in, and deps.py would not fetch that checkout. With the driver go the Payload
