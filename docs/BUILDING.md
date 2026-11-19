@@ -251,3 +251,7 @@ To cut a release:
 4. Push a `vX.Y.Z` tag.
 5. Keep `build/symbols/ProsperoEden-vX.Y.Z.elf` from the build that was published (crash reports
    are read with it): download the tag run's `ProsperoEden-symbols` artifact before it expires.
+
+## Release versions and tags
+
+See [Preparing releases](RELEASING.md) for the version-PR workflow and automatic tagging after merge.
