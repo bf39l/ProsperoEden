@@ -128,7 +128,9 @@ jobs:
           key: downloads-${{ hashFiles('tools/deps.json') }}
 
       - name: Fetch dependencies
-        run: make deps
+        run: |
+          python3 -B tools/check-dependency-seeds.py
+          make deps
 
       # After `make deps`: a restored RADV folder would otherwise stand in for the git checkout
       # it lives in, and deps.py would not fetch that checkout. With the driver go the Payload
@@ -156,9 +158,12 @@ jobs:
       # The file's name carries the cache key's prefix, so a new toolchain starts a new file.
       - name: Fetch the ccache snapshot
         if: steps.ccache.outputs.cache-matched-key == ''
+        # Optional acceleration: a slow release download or extraction must not block a build.
+        timeout-minutes: 3
+        continue-on-error: true
         run: |
           url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/build-cache/ccache-u24.tar"
-          if curl -fsSL --retry 3 -o "$RUNNER_TEMP/ccache-u24.tar" "$url"; then
+          if curl -fsSL --connect-timeout 10 --max-time 60 --retry 1 --retry-max-time 90 -o "$RUNNER_TEMP/ccache-u24.tar" "$url"; then
             mkdir -p "$CCACHE_DIR"
             tar -xf "$RUNNER_TEMP/ccache-u24.tar" -C "$CCACHE_DIR"
             rm "$RUNNER_TEMP/ccache-u24.tar"

@@ -165,18 +165,18 @@ def fetch_git(item):
             print(f'deps: restoring {item["name"]} from {os.path.relpath(snapshot, ROOT)}', flush=True)
             path.parent.mkdir(parents=True, exist_ok=True)
             git('clone', '-q', str(snapshot), str(path))
-            return
-        print(f'deps: fetching {item["url"]} at {item["commit"][:12]} into {path}', flush=True)
-        staging = path.with_name(path.name + f'.partial-{os.getpid()}')
-        shutil.rmtree(staging, ignore_errors=True)
-        git('init', '-q', str(staging))
-        git('remote', 'add', 'origin', item['url'], cwd=staging)
-        git('fetch', '-q', '--depth', '1', 'origin', item['commit'], cwd=staging)
-        git('-c', 'advice.detachedHead=false', 'checkout', '-q', '--detach', 'FETCH_HEAD', cwd=staging)
-        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=staging, text=True).strip()
-        if head != item['commit']:
-            fail(f'{item["name"]}: fetched {head}, pinned {item["commit"]}')
-        staging.rename(path)
+        else:
+            print(f'deps: fetching {item["url"]} at {item["commit"][:12]} into {path}', flush=True)
+            staging = path.with_name(path.name + f'.partial-{os.getpid()}')
+            shutil.rmtree(staging, ignore_errors=True)
+            git('init', '-q', str(staging))
+            git('remote', 'add', 'origin', item['url'], cwd=staging)
+            git('fetch', '-q', '--depth', '1', 'origin', item['commit'], cwd=staging)
+            git('-c', 'advice.detachedHead=false', 'checkout', '-q', '--detach', 'FETCH_HEAD', cwd=staging)
+            head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=staging, text=True).strip()
+            if head != item['commit']:
+                fail(f'{item["name"]}: fetched {head}, pinned {item["commit"]}')
+            staging.rename(path)
     # Files the item's own setup downloads from an unpinned or flaky location: fetch them through
     # the verified download cache instead, and leave them where the setup expects to find them.
     for seed in item.get('seeds', ()):
