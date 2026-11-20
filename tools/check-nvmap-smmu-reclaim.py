@@ -26,6 +26,9 @@ fixture=r'''
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <stdexcept>
+#include "common/scope_exit.h"
 #include <list>
 #include <map>
 #include <memory>
@@ -54,8 +57,8 @@ struct Smmu {
  void Map(DAddr,VAddr,u64,unsigned,bool){++maps;}
  void Unmap(DAddr,u64){}
 };
-struct LowAllocator{u32 Allocate(u32){return 0x10000;}void Free(u64,u32){}};
-struct Gmmu{void Map(GPUVAddr,DAddr,u64){}void Unmap(GPUVAddr,u64){}};
+struct LowAllocator{bool fail=false;unsigned allocations=0,frees=0;u32 Allocate(u32){++allocations;return fail?0:0x10000;}void Free(u64 at,u32){assert(at!=0);++frees;}};
+struct Gmmu{bool throws=false;unsigned maps=0,zero_maps=0,unmaps=0;void Map(GPUVAddr at,DAddr,u64){++maps;zero_maps+=at==0;if(throws)throw std::runtime_error("mock alias mapping failure");}void Unmap(GPUVAddr at,u64){assert(at!=0);++unmaps;}};
 struct Host {
  Smmu smmu;LowAllocator low;Gmmu gmmu_manager;
  Smmu& MemoryManager(){return smmu;}LowAllocator& Allocator(){return low;}
@@ -128,13 +131,49 @@ int main(){
   c.unmap_queue_lock.unlock();held.unlock();worker.join();
   assert(result==0&&victim->d_address==0x100000&&c.host1x.smmu.frees==0);
  }
+
+ // Low-alias failure must never map zero or consume a pin; new backing is returned.
+ {
+  NvMap c;auto h=c.Add(1);c.host1x.smmu.available=BIG_PAGE_SIZE;c.host1x.low.fail=true;
+  auto address=c.PinHandle(1,true);
+  if(address!=0||h->pins!=0||h->d_address!=0||c.host1x.gmmu_manager.zero_maps)return 20;
+  assert(c.host1x.smmu.frees==1&&c.host1x.smmu.available==BIG_PAGE_SIZE&&c.unmap_queue.empty());
+ }
+ // Failed reuse preserves a queued candidate instead of stranding its backing.
+ {
+  NvMap c;auto h=c.Reusable(1);c.host1x.low.fail=true;
+  assert(c.PinHandle(1,true)==0&&h->pins==0&&h->d_address==0x100000&&h->unmap_queue_entry);
+  assert(c.host1x.smmu.frees==0&&c.host1x.gmmu_manager.maps==0);
+  c.host1x.low.fail=false;assert(c.PinHandle(1,true)==0x10000&&h->pins==1&&!h->unmap_queue_entry);
+ }
+ // Existing high-area users keep their pins when a low alias cannot be allocated.
+ {
+  NvMap c;auto h=c.Add(1);h->pins=2;h->d_address=0x100000;c.host1x.low.fail=true;
+  assert(c.PinHandle(1,true)==0&&h->pins==2&&h->d_address==0x100000&&c.host1x.smmu.frees==0);
+ }
+ // Alias map exceptions return the low allocation and new SMMU backing.
+ {
+  NvMap c;auto h=c.Add(1);c.host1x.smmu.available=BIG_PAGE_SIZE;c.host1x.gmmu_manager.throws=true;bool caught=false;
+  try{c.PinHandle(1,true);}catch(const std::runtime_error&){caught=true;}
+  assert(caught&&h->pins==0&&h->d_address==0&&h->pin_virt_address==0);
+  assert(c.host1x.low.frees==1&&c.host1x.gmmu_manager.unmaps==1&&c.host1x.smmu.frees==1);
+ }
+ // The low allocator takes 32-bit lengths: never truncate a larger handle to zero.
+ {
+  NvMap c;auto h=c.Reusable(1);h->aligned_size=u64{1}<<32;
+  assert(c.PinHandle(1,true)==0&&h->pins==0&&h->unmap_queue_entry&&c.host1x.low.allocations==0);
+ }
 }
 '''
 with tempfile.TemporaryDirectory() as scratch:
  p=Path(scratch)
- for label,body,expected in [('fixed',pin,0),('old-wrong-handle',old,10)]:
+ patch=Path(__file__).resolve().parent/'eden-patches/42-nvmap-low-alias-allocation-failure.diff'
+ old_tree=p/'old';old_file=old_tree/'src/core/hle/service/nvdrv/core/nvmap.cpp';old_file.parent.mkdir(parents=True);old_file.write_text(s)
+ subprocess.run(['patch','-s','-R','-p1','-d',str(old_tree),'-i',str(patch)],check=True)
+ previous=old_file.read_text();a=previous.index('DAddr NvMap::PinHandle(');b=previous.index('\nvoid NvMap::UnpinHandle',a);old_alias=previous[a:b]
+ for label,body,expected in [('fixed',pin,0),('old-wrong-handle',old,10),('old-low-alias',old_alias,20)]:
   cpp=p/(label+'.cpp');exe=p/label;cpp.write_text(fixture+unmap+body+tests)
-  subprocess.run(['c++','-std=c++20','-Wall','-Wextra','-Werror','-pthread','-fsanitize=address,undefined',str(cpp),'-o',str(exe)],check=True)
+  subprocess.run(['c++','-std=c++20','-Wall','-Wextra','-Werror','-pthread','-fsanitize=address,undefined','-I'+str(engine/'src'),str(cpp),'-o',str(exe)],check=True)
   v=subprocess.run([str(exe)],timeout=10);assert v.returncode==expected,(label,v.returncode)
   print(label+' PASS',flush=True)
 print('NvMap SMMU reclaim PASS: real PinHandle/UnmapHandle, reclaim/retry, bounded exhaustion, stale entries, low/heap fast paths, concurrent repin revalidation and old-code livelock control (ASan/UBSan)')

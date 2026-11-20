@@ -878,3 +878,90 @@ This is a confirmed pin leak that can cause the observed class of exhaustion.
 The deployed log does not name the pin owners, so it is not proof that this was
 the only contributor in that FF run. No live pinned backing is forcibly reclaimed
 and no address-space limit is increased. Long-running PS5 testing remains needed.
+
+### Long-session slowdown: GC lookahead budget mismatch
+
+A later idle/live-session snapshot reached about212 minutes of presentation
+windows, with the last60 five-second windows at a median30 FPS. Free direct
+memory was5287 MiB, largest free5134 MiB, graphics held1918 MiB/used1696 MiB,
+and no allocation failure was recorded. This does not demonstrate an active-play
+leak or rule out scene-dependent stuttering; the previous active run had increasing
+stalls. The HUD counts retained capacity as used memory, so it cannot alone prove
+that memory is unreleasable.
+
+Code review found a mismatch between the port's GC scan-liveness fix and its
+batched readback lookahead. Actual cleanup budgets evictions and skips retained
+images without consuming that budget. PrefetchDownloads still consumed its
+allowance on each visit. Enough decoding/costly retained entries at the front of
+the LRU therefore prevented dirty images farther along from entering a batch;
+actual cleanup reached them but fell back to individual GPU waits.
+
+Lookahead now follows the same eviction/optional-upstream-visit counting policy,
+with an independent8192-visit bound. Clean and oversized unbatched evictions
+also reduce its simulated usage, so it stops copying at the pressure threshold
+rather than scheduling readbacks for images cleanup would retain. A refill from
+inside cleanup includes the current image whose allowance was already consumed.
+Staging stays bounded to64 MiB/64 images and the actual eviction policy is unchanged.
+
+A production-include test uses the actual LRU implementation and reproduces the
+old retained-prefix starvation. The corrected pass batches20 eligible images
+behind60 retained entries with one simulated GPU wait; it also covers scan bounds,
+clean-image accounting, pressure transitions, refill allowance, byte limits and
+the upstream counting switch under ASan/UBSan. No claim is made that a simulated
+wait count establishes a console speedup. The affected generated PS5 Vulkan
+rasterizer/texture-GC compilation check passes; a full build and active-play
+comparison remain with the user. No live game, settings or console file changed.
+
+### Low-address video alias failure handling (patch 42)
+
+NvMap's low-area pin helper did not check the 32-bit Host1x allocator's result.
+A zero result still reached gmmu_manager.Map at GPU address0 and incremented the
+handle's pin count. The caller received0 and treated the map as failed, leaving
+the newly consumed pin and potentially a zero-address GPU mapping behind. Large
+aligned lengths were also truncated to32 bits before allocation.
+
+Patch42 refuses an unavailable or unrepresentable low alias before mapping or
+consuming a pin. A reused queued handle remains queued on failure, and already
+live high-area users retain their pins. If the request created new high backing
+first, that backing is unmapped and returned on low-alias failure. If mapping
+the alias throws, its reserved low-address range is unmapped/freed as well.
+Successful queued, live, heap and ordinary high-area paths retain their behavior.
+A real address-space shortage can still reach the guest as allocation failure;
+this patch does not fabricate an address or reclaim still-live backing.
+
+The existing actual PinHandle/UnmapHandle sanitizer test now covers fresh, queued
+and live low-alias failures, retry after failure, mapping exceptions and oversized
+lengths. Reversing the exact patch reproduces the original zero-map/consumed-pin
+behavior; the earlier SMMU reclaim-loop negative control is retained. Tests pass
+with ASan/UBSan and the affected PS5 units compile. The observed video-stream
+activity in FF makes this path relevant, but no current FF log proves that this
+particular low-alias allocator failure occurred. It is a confirmed source defect,
+not a newly diagnosed console crash.
+
+### Shader cache six-input support and bounded reads (patch 43)
+
+The engine supports six Maxwell graphics program inputs (including both vertex
+inputs), but the Vulkan and OpenGL disk-cache workers collected environments in
+a static_vector with capacity5. Runtime serialization already allows all six.
+A valid six-input pipeline could therefore be saved successfully but fail when
+loaded. Both worker containers now use Maxwell::MaxShaderProgram, matching the
+producer and the graphics keys; no cache layout/version or valid shader changes.
+
+LoadPipelines now rejects zero or out-of-range environment counts before vector
+allocation/front(), and compute records must contain one environment. Renderer
+callbacks verify that the environment count matches the key's active hashes
+before scheduling work. Invalid counts use the existing cache-error path; valid
+records continue loading normally. Cached instruction reads additionally check
+the captured code vector, not only its advertised address range. Diagnostic
+dumps reject offsets outside captured bytes before subtracting their length.
+These are targeted count/read guards, not a claim of complete cache-format
+validation or a diagnosis of the observed FF crashes.
+
+The sanitizer regression uses the production loader, key/read/dump guards and
+real Boost static_vector, with a valid six-input graphics record, compute,
+zero/oversized counts, mismatched keys and short captured data. Restoring the
+old five-entry capacity reproduces the failure. The existing shader error-handler
+and environment-bound tests pass. PS5 shader_environment, Vulkan pipeline cache
+and OpenGL shader cache compilation checks pass. No running game, saved data,
+console cache, engine pin or app version was modified during this work. Full app
+build and PS5 gameplay confirmation remain with the user.
