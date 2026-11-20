@@ -1035,3 +1035,30 @@ read-ownership and allocation-recovery regressions also pass. The actual PS5
 Vulkan rasterizer, Vulkan buffer-cache cost unit, OpenGL buffer cache and OpenGL
 rasterizer compile with the configured toolchain. Full application build and PS5
 gameplay validation remain with the user.
+
+### Buffer texture views excluded from image scaling (patch 46)
+
+The FF report `crash-20261121-001551.txt` records a GPU-thread SIGSEGV at
+`eboot+0x23077b6`, reading address `0x350`. The local release ELF has the same
+reported text size; symbolization places the fault in Vulkan Image::ScaleDown.
+The instruction reads the resolution pointer through a null runtime pointer.
+The first retained caller is TextureCache::FillImageViews during compute setup.
+
+A valid buffer-backed image view has a nonzero view ID but deliberately uses
+NULL_IMAGE_ID as its parent. FillImageViews checked only the view ID before
+blacklist-driven scaling, so these views reached the sentinel image, whose
+Vulkan runtime is null. Patch 46 skips that image-only operation for views with
+no parent image. It preserves the buffer view ID for pipeline binding and keeps
+normal image scaling, blacklist iteration and deletion retries unchanged.
+
+The sanitizer regression executes the actual FillImageViews method for graphics
+and compute with null, buffer and normal image views, blacklist controls and
+deletion retries. Removing the guard reproduces a scaling call on the null image.
+Actual PS5 Vulkan rasterizer, compute pipeline and OpenGL rasterizer compilation
+checks pass. Full application build and console gameplay remain untested here.
+
+This report has no large-buffer request or allocation-recovery marker, unlike
+the prior nearly 4 GiB allocation failure. It also contains an earlier mapping
+block-counter assertion, an invalid Maxwell instruction and unimplemented puller
+commands. The guard fixes the concrete null-parent scaling defect; it does not
+establish the origin of those earlier warnings or rule out additional failures.
