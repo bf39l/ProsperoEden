@@ -40,7 +40,7 @@ namespace Maxwell{constexpr size_t MaxShaderProgram=6;}
 constexpr std::array<char,8>MAGIC_NUMBER{'y','u','z','u','c','a','c','h'};
 struct FileEnvironment:Shader::Environment{
  Shader::Stage stage=Shader::Stage::VertexB;u32 read_lowest=0,read_highest=0;std::vector<u64>code;
- void Deserialize(std::ifstream&f){f.read(reinterpret_cast<char*>(&stage),sizeof(stage));}
+ void Deserialize(std::ifstream&f,std::streampos){f.read(reinterpret_cast<char*>(&stage),sizeof(stage));}
  Shader::Stage ShaderStage()const{return stage;}
  u64 ReadInstruction(u32);
 };

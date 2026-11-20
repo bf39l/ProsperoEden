@@ -965,3 +965,73 @@ and environment-bound tests pass. PS5 shader_environment, Vulkan pipeline cache
 and OpenGL shader cache compilation checks pass. No running game, saved data,
 console cache, engine pin or app version was modified during this work. Full app
 build and PS5 gameplay confirmation remain with the user.
+
+### Shader cache payload validation before allocation (patch 44)
+
+The upstream environment reader resized its code vector from the recorded length
+before checking whether that payload fit the file. The PS5 port already had a
+buffered reader, per-field size screening, allocation-error handling and recovery
+of whole entries before a damaged tail. Those existing protections are retained.
+The remaining gap is that metadata counts were screened individually as numbers,
+not as their combined serialized byte lengths; a count can pass that screen while
+its entries cannot fit the remaining file. Such data could cause avoidable
+allocations and reads before the existing recovery path handled the failure.
+
+The environment reader now validates its stage and writer-consistent code range,
+and checks code, metadata tables and stage-specific trailing fields against the
+remaining bytes before allocating. Count checks divide before multiplying to
+avoid overflow. LoadPipelines passes its already-known file end, including through
+the PS5 buffered reader; there is no per-environment seek to the file end and no
+new shader-size cap, format/version change or cache reset. PS5 compute entries
+must contain one environment. The host cache-check fixture's manually written
+16-byte code range was corrected to match the real writer (offsets0 and8).
+
+Tests execute the production serializer/deserializer for all seven shader-stage
+variants with metadata, every truncation of a compute record, overflowing counts,
+inconsistent ranges and payload lengths beyond EOF. They verify refusal before
+code allocation, preserve following key bytes, and accept a valid shader over1 MiB.
+A control without the new validation reproduces allocation before detecting EOF.
+The PS5-specific test demonstrates a count accepted by its earlier screening but
+rejected by the new byte budget; the real buffered reader still preserves the
+last whole entry across chunk boundaries. Buffer, six-input and key/count cache
+regressions also pass under ASan/UBSan. The production CMake-derived shader reader
+was regenerated and compiled, along with both PS5 renderer cache callers.
+
+This improves restart/cache-load reliability after interrupted writes. No FF log
+has established that such a damaged record caused a reported gameplay failure,
+and this is not presented as a fix for the slow scene or every possible cache
+error. The running console and its cache files were not modified.
+
+### Storage binding span and large-request provenance (patch 45)
+
+The pre-44 gameplay log requested 4,267,442,176 bytes (`0xfe5c0000`) before
+buffer-cache coalescing added another 256 KiB. The existing bounded OOM recovery
+released retired buffers but could not satisfy this nearly 4 GiB request. That
+log does not identify which binding supplied the size; patch 44 addresses cache
+loading and does not explain this live allocation.
+
+StorageBufferBinding derived read-only lengths by subtracting two independently
+translated physical addresses. A changed or discontinuous translation can make
+that subtraction negative and wrap it into a huge unsigned length. Patch 45
+calculates the logical span entirely in GPU virtual addresses, retaining the
+existing multi-range storage path. It handles missing translations and refuses
+spans that overflow the address or existing 32-bit binding-size representation.
+It does not impose an arbitrary allocation cap or truncate valid large buffers.
+
+Bounded diagnostics record large index, vertex, indirect, transform-feedback,
+texture and storage requests and their existing operands, plus physical cache
+ranges. They add no guest-memory reads or GPU waits. Separate counters keep
+smaller large requests from hiding requests of 2 GiB or more. Translation
+discontinuities are also sampled. These records distinguish this storage bug
+from other possible sources of huge runtime requests on the next PS5 run.
+
+The regression executes the actual engine StorageBufferBinding method under
+ASan/UBSan. A discontinuous-translation fixture reproduces the exact observed
+`0xfe5c0000` size with the original method; the patched method returns 4 KiB.
+Continuous mappings across four alignments, read/write spans, a valid 300 MiB
+binding, missing mappings and address/size overflow are covered. This proves a
+size-calculation defect, not that the console crash used that exact path. Buffer
+read-ownership and allocation-recovery regressions also pass. The actual PS5
+Vulkan rasterizer, Vulkan buffer-cache cost unit, OpenGL buffer cache and OpenGL
+rasterizer compile with the configured toolchain. Full application build and PS5
+gameplay validation remain with the user.
