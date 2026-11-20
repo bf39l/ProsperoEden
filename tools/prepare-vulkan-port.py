@@ -2054,7 +2054,7 @@ for statement in (
     'Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);',
     'Shader::Maxwell::Flow::CFG cfg{env, pools.flow_block, env.StartAddress()};',
 ):
-    expected = 2 if 'cfg_offset' in statement else 1  # graphics exception dump too
+    expected = 1  # Exception dumps use captured bytes without re-decoding a CFG.
     if shader_source.count(statement) != expected:
         raise RuntimeError(f'Shader CFG anchor changed: {statement}')
     shader_source = shader_source.replace(statement,

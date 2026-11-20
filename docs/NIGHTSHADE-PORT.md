@@ -616,3 +616,265 @@ This fixes a plausible source of progressive pinned-address exhaustion, but
 that exact sequence is not established in the console log. Sparse remap ownership
 and other mapping lifetimes may still need investigation. No full application
 build, deployment, pin/version change, commit or push was performed here.
+
+### Follow-up: mapping teardown indexes (patch 32)
+
+A live FF session snapshot on 2026-11-20 continued through at least 778 seconds
+with save activity and no recorded SMMU exhaustion, device loss or guest panic.
+It still reported invalid shader instructions around 290 seconds, an unsupported
+constant-buffer binding 31, and intermittent unmapped device reads at 0x7da01000.
+Those are unresolved rendering evidence; this patch does not claim to fix their
+origin or the remaining flicker/black lines.
+
+Code review found that explicit UnmapBuffer removed the mapping record but left
+its address in the parent allocation's mappings vector. FreeSpace could then
+return early on that stale address, leaving other mappings and their pins alive.
+A remap at the same address also appended another vector entry. Conversely,
+FreeSpace removed mapping records without clearing map_buffer_offsets, so a
+later UnmapBuffer could dereference a missing record.
+
+Patch 32 uses the shared FreeMappingLocked teardown for explicit unmaps, removes
+fixed addresses from their allocation vector, and clears the offset index with
+the record. FreeSpace already iterates a copy of the allocation, so pruning the
+original vector does not invalidate its loop. The sanitizer regression executes
+production cleanup functions through 1,000 unmap/remap cycles, allocation release,
+redundant unmaps and dynamic mappings; a control retaining the old stale list is
+rejected. The affected PS5 compilation unit and earlier pin/failure checks pass.
+This is a proven bookkeeping defect, not proof that FF exercised that sequence.
+Sparse Remap pin accounting remains a separate unresolved review item.
+
+### Follow-up: GPU backing range validation (patch 33)
+
+MapBufferEx's subregion-remap path compared only mapping_size against the
+original mapping size, ignoring buffer_offset. A positive offset plus a valid
+length could therefore extend outside the backing mapping; negative offsets
+were also accepted. Ordinary mappings did not validate buffer_offset and size
+against the nvmap handle's original size before pinning. Patch 33 rejects these
+invalid requests with BadValue using subtraction-based checks that cannot wrap.
+It preserves the existing zero-size convention (the full original handle size).
+
+The sparse Remap ioctl also omitted the address-space mutex despite accessing
+the same allocation and GMMU state as AllocateSpace/FreeSpace/MapBufferEx.
+It now takes that mutex before checking or modifying address-space state.
+
+The bounds regression executes the production guards with exact-end ranges,
+negative offsets, oversized subregions and overflowing lengths under ASan/UBSan.
+Earlier mapping-failure and teardown tests also pass, with the former fixture
+corrected to use the ioctl's actual signed buffer_offset and a valid partial
+mapping size. The changed PS5 compilation unit builds. These source defects
+could permit invalid GPU reads but are not yet proven to be the source of FF's
+invalid shader words. No shader instruction is replaced with a guessed value,
+and no warning is suppressed by this patch.
+
+### Follow-up: compiler environment bounds and error reporting (patches 34–35)
+
+Shader environment graphics and compute constant-buffer reads indexed their
+host arrays before checking the requested bank; the compute path also shifted
+its enable mask by the unchecked bank. Patch 34 validates the index before either
+operation and raises Shader::LogicError on invalid banks. Reads preserve the
+existing zero result outside a buffer but now require a whole four-byte word
+inside its advertised size. Texture information reads explicitly reject indexes
+above tic_limit rather than continuing past an assertion into unrelated data.
+These changes prevent unsafe compiler-side reads, not the origin of bad indexes.
+
+The Vulkan graphics pipeline exception handler previously constructed a second
+CFG for every stage before dumping captured shader bytes and logging the first
+exception. DumpImpl does not use its read-range parameters, so that reconstruction
+was unnecessary. It could produce further invalid-instruction reports and throw
+again while handling the original error. Patch 35 logs the first error first,
+dumps existing bytes without re-decoding, and catches individual dump exceptions
+so later dumps and the normal null-pipeline return still execute. The PS5 adapter's
+CFG instrumentation anchor count is updated accordingly. This can explain some
+secondary diagnostic noise; it does not prove that the underlying shader was valid.
+
+Production-function ASan/UBSan checks cover both constant-buffer environments,
+valid final entries, invalid banks including huge indexes, partial words, TIC
+limits, and no GPU reads on rejection. The production exception-handler test
+injects a failed first dump and verifies the original error is retained, remaining
+dumps are attempted, and no second exception escapes. Tests are part of ordinary
+source checks. No console build, deployment, engine pin or version change is made.
+
+Sparse Remap still acquires pins without recording per-subrange ownership. A
+correct repair must preserve overlapping/partial remaps and release pins only
+when the last live subrange is removed. Simply unpinning after each Map would
+allow the SMMU to reclaim live GPU backing, so that shortcut is intentionally not
+applied. This remains a separate lifecycle defect under review.
+
+### Follow-up: sparse remap backing and allocation lookups (patch 36)
+
+Sparse Remap checked its destination but not whether handle_offset_big_pages
+plus the requested size fit the nvmap handle. Patch 36 checks source bounds before
+PinHandle, rejects invalid requests with BadValue and preserves valid exact-end
+mappings. Destination checks for sparse and ordinary fixed mappings now use
+subtraction rather than overflowing offset-plus-size arithmetic. Both lookups
+check upper_bound against begin before decrementing: the previous post-decrement
+condition could decrement begin/end in an empty allocation map even on rejection.
+
+HeapMapper::IsInBounds similarly used start + size and heap_base + heap_size;
+a wrapping requested end could incorrectly qualify for the preallocated mapping
+path. It now checks the offset and remaining capacity without forming either end.
+
+A production-snippet regression covers sparse backing bounds, empty/below-first
+allocation lookups, exact-end mappings, huge overflowing requests and heap ranges
+with debug iterators plus ASan/UBSan. This protects bad-input paths; the current
+FF logs do not prove that any of these exact requests were made. Sparse pin
+subrange ownership remains unresolved rather than being prematurely unpinned.
+
+### Console result: FF Vulkan allocation failure after about 23 minutes
+
+A later snapshot of the same pre-patches32–36 test session ended with CreateBuffer
+VK_ERROR_OUT_OF_DEVICE_MEMORY: 310444032 bytes (~296 MiB), usage 0xbff. Outside-budget
+retry and a retry after giving back 144 MiB both failed. The pool's reported largest
+free block at refusal was 260 MiB; VMA held 4184 MiB, 2778 MiB allocated. A preceding
+sample still had 2524 MiB total free across 99 runs. This supports fragmentation or
+a temporary allocation peak, not a conclusion that all physical memory was used.
+The session caught the error, shut down and reopened the launcher; no new host
+crash file was listed and no SMMU exhaustion was observed.
+
+Buffer cache merges allocate the combined buffer before retiring the originals,
+and may add streaming expansion. The current log does not identify the failed
+buffer's creator or whether it was such a merge. Further diagnostics must measure
+requested/merged spans and retained overlap sizes before treating that hypothesis
+as established. Patches32–36 have not been tested on this console session and are
+not claimed to fix this allocation failure.
+
+### OOM recovery: synchronized retirement queue release (patch 37)
+
+The ~296 MiB buffer refusal exposed a recovery gap: replaced buffers remain in
+the cache's destruction ring for six/eight frame ticks, while the allocator's
+existing OOM relief releases idle staging buffers and CPU heap memory only.
+A cache merge needs its live source buffers and the destination simultaneously;
+retired buffers from earlier merges can unnecessarily increase that peak.
+
+On PS5 Vulkan device-memory allocation failure, buffer creation now waits for
+scheduler.Finish (submission and GPU completion), clears only that retired-buffer
+ring, and retries creation once if objects were released. Live overlapping
+buffers are not evicted or overwritten, GPU-written contents are preserved, and
+the ordinary copy/join path still runs after successful allocation. No retired
+objects means no additional allocation attempt. Device loss, other exceptions,
+or a failed GPU wait do not trigger release; a second allocation failure follows
+the existing controlled session shutdown. The recovery log reports requested and
+merged spans, live overlap count and the number of retired objects released.
+
+The runtime classifies an exception_ptr through typed exception handling, so this
+works with the PS5's -fno-rtti configuration. The existing PS5 SlotVector recovery
+returns a failed constructor's slot before retrying. The new sanitizer regression
+executes the production retry and classifier with that real generated container
+and the real destruction ring: successful recovery, first-attempt success, second
+failure, empty ring, device loss and failed wait are covered. It asserts that
+retired destructors run after synchronization and live payloads stay unchanged.
+
+This fixes missing emergency reclamation, not a promise that every fragmented
+pool can satisfy a large contiguous allocation. The console session must confirm
+whether retired buffers were contributing to this particular FF failure. No
+resolution reduction, discarded live data, unlimited retry or engine downgrade
+is used. Full application build and console testing remain with the user.
+
+### Startup compatibility correction: aligned nvmap backing
+
+The first console build of patches32–37 reached initialization but the guest
+panicked twice within startup (result 0x2a2); no OOM recovery ran. Review found
+that patches33/36 compared explicit GPU mapping ranges to Handle::orig_size.
+That is the payload length, while Alloc and PinHandle align and map aligned_size.
+A valid page-sized mapping of the final padded page can exceed orig_size.
+The guards now compare against aligned_size; the original default mapping-size
+semantics remain unchanged. Tests cover non-page-sized payloads with valid padded
+mappings and reject one byte beyond the aligned backing. Original-size negative
+controls reproduce the compatibility rejection. The affected PS5 unit compiles.
+
+The deployed build did not log the rejected range, so this source defect is
+confirmed but its exact link to the two guest panics still needs a console test.
+Patch38 logs handle, offset, size, original and aligned lengths on range rejection.
+The OOM retirement recovery is retained. Earlier references to original-size
+bounds describe the initial implementation and are superseded by this correction.
+
+### Buffer usage tracker masks (patch 39)
+
+UsageTracker is the real Vulkan buffer's read/usage tracker; CanReorderUpload
+uses it to decide whether a transfer can be placed on the earlier upload command
+buffer. Its original mask used min(size,4096) / 64, rounded down and independent
+of the offset within a unit. A range shorter than 64 bytes gave zero bits and
+shifted a 64-bit value by 64, undefined behavior. Unaligned tails were not fully
+covered; zero-sized page tails also reached that shift. Same-page queries then
+unnecessarily tested a prefix from the page's start rather than just their units.
+
+Patch39 computes the first/last touched units after clipping to the current page,
+uses shifts only in [0,63], makes empty ranges no-ops, avoids that extra same-page
+prefix check, and conservatively refuses reordered uploads for invalid query
+ranges. The existing 12-byte indirect compute usage marker now has a well-defined
+mask. Valid accesses remain tracked at the existing 64-byte granularity.
+
+The test uses the actual production tracker and CanReorderUpload, checks short
+indirect arguments and unit/page boundaries, and compares 64,000 randomized
+queries with independent byte-to-unit coverage. Reversing the exact patch restores
+the original header and UBSan reproduces its shift-by-64 on the short argument
+case. This establishes a tracker defect, not proof that it caused a particular
+FF crash. In particular, the original undefined behavior could also over-mark
+usage and cause needless serialization; its observed effects depend on compiler
+and input. Console confirmation remains required.
+
+### Verified middleware and invalid shader fallback (patch 40)
+
+The locally supplied FF executable, with the same build ID as the console log,
+identifies its middleware as Unreal Engine 5.6.1. This confirms newer middleware,
+but compatibility is determined by the Switch CPU/GPU operations the executable
+uses; the version marker alone does not identify a missing emulator feature.
+Only the extracted executable segment hashes were checked, not all assets or
+full-game behavior. The game container and keys remain private and unchanged.
+
+Maxwell::Decode previously logged/asserted on an invalid instruction and returned
+Opcode::NOP anyway. The prior FF logs exercised that path with invalid words,
+including all-one data. Patch40 raises Shader::LogicError instead, using the
+existing Vulkan/OpenGL shader compilation exception boundaries. It prevents an
+invalid instruction stream from silently becoming a runnable shader. It does
+not implement an unknown valid instruction or replace invalid game state with a
+fabricated result. A refused shader may still leave missing rendering until its
+input data or actual missing operation is fixed.
+
+A sanitizer test compiles the real decoder, visits the real instruction table's
+canonical encodings, rejects the invalid words observed in FF, and verifies that
+the prior NOP fallback accepted those words. The changed PS5 decoder compiles.
+The Vulkan error-handler test also passes. Full compatibility is not claimed:
+startup after the aligned-backing correction, long play beyond the prior OOM,
+restarts and later scenes still require console testing. Sparse remap pin
+ownership and the origin of invalid shader/indirect data remain open issues.
+
+### SMMU exhaustion: sparse remap pin ownership (patch 41)
+
+The subsequent FF session ended at 1003.755 s with a 64 MiB SMMU allocation
+failure and no unpinned handles to reclaim, followed by guest panic. This differs
+from the earlier Vulkan buffer OOM. Source review confirms a separate lifetime
+leak: the sparse Remap ioctl called PinHandle for every nonzero entry, but stored
+no ownership record and never released those pins on replacement or MapSparse.
+FreeSpace likewise could not release them. Repeated remaps therefore kept the
+backing mappings permanently pinned and unavailable to the SMMU reclaim queue.
+
+Patch41 associates each successful sparse pin with shared ownership of its live
+GPU-address intervals. Partial replacements preserve left/right fragments using
+the same pin; the pin is released once the last fragment is gone. Independent
+mappings of the same handle retain independent pins. Sparse clearing, allocation
+release, fixed mappings overwriting sparse regions and address-space destruction
+all retire affected owners. The GPU mapping is updated before old pins are
+released. Up to three replacement nodes are allocated before changing mappings;
+if preparation or the GPU update throws, the old owners remain and the new pin
+is released. Zero-length sparse remaps acquire no pin. The aligned backing
+bounds and earlier failure checks remain in force.
+
+FreeMappingLocked no longer claims noexcept: ownership preparation and existing
+GPU mapping operations may throw, and those errors must reach the normal session
+boundary instead of terminating the host. GPU page tables are destroyed before
+remaining sparse owners, and NvMap outlives the owning address-space devices.
+
+The production Remap/FreeSpace regression runs 1000 replacements under a two-live-
+handle budget, checks split survivors, independent mappings, failed pins and GPU
+updates, zero-length remaps, FreeSpace and destruction. Another 1500 randomized
+interval changes are compared against an independent per-page lifetime model.
+Reversing the exact patch restores the original Remap and reproduces its leaked
+pin on sparse clearing. ASan/UBSan and checked iterators pass, as do earlier fixed
+pin, mapping cleanup/failure, aligned backing and SMMU reclamation tests. The
+changed GPU address-space and owning NVDRV module PS5 units compile.
+
+This is a confirmed pin leak that can cause the observed class of exhaustion.
+The deployed log does not name the pin owners, so it is not proof that this was
+the only contributor in that FF run. No live pinned backing is forcibly reclaimed
+and no address-space limit is increased. Long-running PS5 testing remains needed.

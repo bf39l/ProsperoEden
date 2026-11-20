@@ -12,24 +12,27 @@ a=v.index('NvResult nvhost_nvdec_common::MapBuffer(');b=v.index('\n}\n',a)+2;vid
 code=r'''
 #include <algorithm>
 #include <cassert>
+#define LOG_ERROR(...) ((void)0)
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <vector>
 #include "common/scope_exit.h"
+#include "core/hle/service/nvdrv/core/sparse_mapping_ownership.h"
 using u32=std::uint32_t;using u64=std::uint64_t;using DAddr=u64;using DeviceFD=unsigned;
 enum class NvResult{Success,BadValue,InsufficientMemory};
 namespace Tegra {enum class PTEKind{Zero};}
 struct Entry{u32 handle=1,handle_offset_big_pages=2,kind=0;};
-struct Params{u32 handle=1;u64 buffer_offset=0x200,mapping_size=0;};
-struct Handle{u64 orig_size=4096;};
+struct Params{u32 handle=1;std::int64_t buffer_offset=0x200;u64 mapping_size=3584;};
+struct Handle{u64 orig_size=4096,aligned_size=4096;};
 struct Pins{
  bool valid=true;unsigned cursor=0;std::vector<DAddr> addresses;std::vector<unsigned> unpinned;
  std::shared_ptr<Handle> GetHandle(unsigned){return valid?std::make_shared<Handle>():nullptr;}
  DAddr PinHandle(unsigned,bool){assert(cursor<addresses.size());return addresses[cursor++];}
  void UnpinHandle(unsigned id){unpinned.push_back(id);}
 };
+struct SparsePin{Pins&nvmap;unsigned handle;SparsePin(Pins&n,unsigned h):nvmap(n),handle(h){}~SparsePin(){nvmap.UnpinHandle(handle);}};
 struct Gmmu{unsigned maps=0;DAddr last=0;void Map(u64,DAddr at,u64,Tegra::PTEKind,bool){++maps;last=at;}};
 NvResult MapOne(Pins& nvmap,Params params,Gmmu& gpu,bool fail_after_pin=false,bool throws=false){
 '''+prologue+r'''
@@ -41,6 +44,8 @@ NvResult MapOne(Pins& nvmap,Params params,Gmmu& gpu,bool fail_after_pin=false,bo
 NvResult RemapOne(Pins& nvmap,const Entry& entry,Gmmu* gmmu){
  struct{unsigned big_page_size_bits=16;} vm;
  u64 virtual_address=0x40000,size=65536;bool use_big_pages=true;
+ u64 backing_offset=u64(entry.handle_offset_big_pages)<<vm.big_page_size_bits;
+ Service::Nvidia::NvCore::SparseMappingOwnership sparse_mapping_pins;
 '''+remap+r'''
  return NvResult::Success;
 }
