@@ -882,6 +882,104 @@ foreach(bits 32 64)
                                  static_cast<unsigned long long>(eden_thread ? eden_thread->GetThreadId() : 0),
                                  eden_name.c_str());
                 }
+                    // Dynarmic's saved state can lag instructions inside the current
+                    // block. Keep raw values labelled as saved state, not fault-time
+                    // operands. Capture once per session.
+                    {
+                        for (unsigned eden_reg = 0; eden_seen == 1 && eden_reg < 31; ++eden_reg) {
+                            std::fprintf(stderr, "EDEN_UNMAPPED_SAVED_REGISTER x%u=%#llx\n",
+                                         eden_reg, static_cast<unsigned long long>(
+                                             m_parent.m_jit->GetRegister(eden_reg)));
+                        }
+                        // Match the verified caller before interpreting saved registers
+                        // as this title's entry, owner and queued handle.
+                        if (eden_lr >= 12 &&
+                            m_memory.IsValidVirtualAddressRange(eden_lr - 12, 12) &&
+                            m_memory.Read32(eden_lr - 12) == 0xf940aea8 &&
+                            m_memory.Read32(eden_lr - 8) == 0x9b3a2120 &&
+                            m_memory.Read32(eden_lr - 4) == 0x97ffff8e &&
+                            !::Eden::UnmappedLog::RenderCaptured().exchange(true)) {
+                            std::fprintf(stderr, "EDEN_RENDER_CAPTURE version=2 read=%#llx pc=%#llx lr=%#llx saved_state=1\n",
+                                static_cast<unsigned long long>(vaddr),
+                                static_cast<unsigned long long>(eden_pc),
+                                static_cast<unsigned long long>(eden_lr));
+                            for (unsigned reg = 0; reg < 31; ++reg)
+                                std::fprintf(stderr, "EDEN_RENDER_REGISTER x%u=%#llx\n", reg,
+                                    static_cast<unsigned long long>(m_parent.m_jit->GetRegister(reg)));
+                            const auto eden_dump = [&](const char* label, u64 base, u64 begin, u64 end) {
+                                // Each word is checked independently. Do not chase the
+                                // captured pointer or read through an invalid mapping.
+                                for (u64 offset = begin; offset < end; offset += 8) {
+                                    if (base > ~u64{0} - offset - 7) break;
+                                    const u64 address = base + offset;
+                                    const bool mapped = m_memory.IsValidVirtualAddressRange(address, 8);
+                                    const u64 value = mapped ? m_memory.Read64(address) : 0;
+                                    std::fprintf(stderr,
+                                        "EDEN_RENDER_ENTRY label=%s base=%#llx offset=%#llx mapped=%u value=%#llx\n",
+                                        label, static_cast<unsigned long long>(base),
+                                        static_cast<unsigned long long>(offset), unsigned(mapped),
+                                        static_cast<unsigned long long>(value));
+                                }
+                            };
+                            eden_dump("entry", m_parent.m_jit->GetRegister(0), 0, 0xe8);
+                            eden_dump("owner", m_parent.m_jit->GetRegister(21), 0x158, 0x198);
+                            const u64 owner = m_parent.m_jit->GetRegister(21);
+                            const u64 entry = m_parent.m_jit->GetRegister(0);
+                            eden_dump("owner-full", owner, 0, 0x200);
+                            eden_dump("queued-window", m_parent.m_jit->GetRegister(23), 0, 0x100);
+                            eden_dump("stack", eden_sp, 0, 0x200);
+                            // Include separately allocated entry storage and allocation
+                            // bits when present, using the same small read budget.
+                            if (entry <= ~u64{0} - 0xd8 &&
+                                m_memory.IsValidVirtualAddressRange(entry, 8) &&
+                                m_memory.IsValidVirtualAddressRange(entry + 0xd0, 8)) {
+                                const u64 backing = m_memory.Read64(entry);
+                                const u64 storage = m_memory.Read64(entry + 0xd0);
+                                if (backing) eden_dump("backing", backing, 0, 0x100);
+                                if (storage) eden_dump("entry-storage", storage, 0, 0x100);
+                            }
+                            if (owner <= ~u64{0} - 0x180 &&
+                                m_memory.IsValidVirtualAddressRange(owner + 0x178, 8)) {
+                                const u64 bitmap = m_memory.Read64(owner + 0x178);
+                                if (bitmap) eden_dump("allocation-bits", bitmap, 0, 0x40);
+                            }
+                            // AArch64 frame records contain previous FP and return PC.
+                            // Stop on cycles, misalignment, invalid memory or the budget.
+                            u64 frame = m_parent.m_jit->GetRegister(29);
+                            for (unsigned depth = 0; depth < 24; ++depth) {
+                                if ((frame & 15) || frame > ~u64{0} - 16 ||
+                                    !m_memory.IsValidVirtualAddressRange(frame, 16)) break;
+                                const u64 next = m_memory.Read64(frame);
+                                const u64 ret = m_memory.Read64(frame + 8);
+                                std::fprintf(stderr, "EDEN_RENDER_FRAME depth=%u fp=%#llx return=%#llx\n",
+                                             depth, static_cast<unsigned long long>(frame),
+                                             static_cast<unsigned long long>(ret));
+                                if (ret >= 32) eden_dump("return-code", ret - 32, 0, 64);
+                                if (next <= frame || next - frame > 1024 * 1024) break;
+                                frame = next;
+                            }
+                            if (owner <= ~u64{0} - 0x168 &&
+                                m_memory.IsValidVirtualAddressRange(owner + 0x158, 16)) {
+                                const u64 array = m_memory.Read64(owner + 0x158);
+                                const u64 count = m_memory.Read32(owner + 0x160);
+                                const u64 capacity = m_memory.Read32(owner + 0x164);
+                                std::fprintf(stderr,
+                                    "EDEN_RENDER_ARRAY array=%#llx count=%llu capacity=%llu entry=%#llx\n",
+                                    static_cast<unsigned long long>(array),
+                                    static_cast<unsigned long long>(count),
+                                    static_cast<unsigned long long>(capacity),
+                                    static_cast<unsigned long long>(entry));
+                                // Bound by logical length and a hard cap even if metadata
+                                // is corrupt. Full entries show free-list and lifetime fields.
+                                for (u64 index = 0; index < count && index < 64; ++index) {
+                                    if (array > ~u64{0} - index * 0xe8 - 0xe8) break;
+                                    eden_dump("array-entry", array + index * 0xe8, 0, 0xe8);
+                                }
+                            }
+                            std::fprintf(stderr, "EDEN_RENDER_CAPTURE_END version=2\n");
+                            std::fflush(stderr);
+                        }
+                    }
             }
         }
 ]=])
@@ -1315,8 +1413,8 @@ string(FIND "${break_source}" "${panic_site}" panic_at)
 if(panic_at LESS 0)
     message(FATAL_ERROR "Pinned svcBreak completion changed")
 endif()
-string(REPLACE "${panic_site}" "    if (!notification_only && !system.IsShuttingDown() && !system.DebuggerEnabled() &&\n        (break_reason == BreakReason::Panic || break_reason == BreakReason::Assert ||\n         break_reason == BreakReason::CppException)) {\n        ::Eden::RecordGuestPanic(static_cast<u32>(break_reason),\n                               GetCurrentThread(system.Kernel()).GetThreadId());\n    }\n${panic_site}" break_source "${break_source}")
-write_derived("${PORT_BUILD_DIR}/svc_exception.cpp" "#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/ipc_ring.h\"\n${break_source}")
+string(REPLACE "${panic_site}" "    if (!notification_only && !system.IsShuttingDown() && !system.DebuggerEnabled() &&\n        (break_reason == BreakReason::Panic || break_reason == BreakReason::Assert ||\n         break_reason == BreakReason::CppException)) {\n        // Capture directly to stderr before the frontend starts stopping the cores.\n        if (auto* eden_process = GetCurrentProcessPointer(system.Kernel())) {\n            if (auto* eden_arm = eden_process->GetArmInterface(system.CurrentPhysicalCore().CoreIndex())) {\n                ThreadContext eden_context{};\n                eden_arm->GetContext(eden_context);\n                auto& eden_memory = eden_process->GetMemory();\n                ::Eden::PanicEvidence(info1, info2,\n                    {eden_context.pc, eden_context.lr, eden_context.sp, eden_context.fp},\n                    [&](u64 address, u64 size) { return eden_memory.IsValidVirtualAddressRange(address, size); },\n                    [&](u64 address) { return eden_memory.Read32(address); },\n                    [&](u64 address) { return eden_memory.Read64(address); },\n                    [](const char* line) { std::fprintf(stderr, \"%s\\n\", line); });\n            }\n        }\n        ::Eden::RecordGuestPanic(static_cast<u32>(break_reason),\n                               GetCurrentThread(system.Kernel()).GetThreadId());\n    }\n${panic_site}" break_source "${break_source}")
+write_derived("${PORT_BUILD_DIR}/svc_exception.cpp" "#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/ipc_ring.h\"\n#include \"core/hle/kernel/physical_core.h\"\n${break_source}")
 list(REMOVE_ITEM core_sources "hle/kernel/svc/svc_exception.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/svc_exception.cpp")
 file(READ "${PROJECT_SOURCE_DIR}/src/core/memory.cpp" arena_source)
@@ -1656,7 +1754,22 @@ if(PS5_NATIVE)
         message(FATAL_ERROR "Pinned NSO cheat registration changed")
     endif()
     string(REPLACE "${old_nso_cheats}" "${new_nso_cheats}" nso_source "${nso_source}")
-    string(PREPEND nso_source "#include <cstdio>\n")
+    set(ff_guard_site "    // Apply cheats if they exist and the program has a valid title ID")
+    string(FIND "${nso_source}" "${ff_guard_site}" ff_guard_at)
+    if(ff_guard_at LESS 0)
+        message(FATAL_ERROR "Pinned NSO render request guard site changed")
+    endif()
+    set(ff_guard_code [=[    if (process.GetProgramId() == 0x0100b8a026f14000ULL && name == "main") {
+        const bool applied = ::Eden::ApplyFFRenderRequestGuard(
+            process.GetProgramId(), name, nso_header.build_id,
+            std::span<u8>(codeset.memory).subspan(module_start));
+        std::fprintf(stderr, "EDEN_FF_RENDER_REQUEST_GUARD applied=%u module=main\n",
+                     unsigned(applied));
+    }
+]=])
+    string(REPLACE "${ff_guard_site}" "${ff_guard_code}
+${ff_guard_site}" nso_source "${nso_source}")
+    string(PREPEND nso_source "#include <cstdio>\n#include \"${EDEN_PORT_DIR}/ff_render_request_guard.h\"\n")
     write_derived("${PORT_BUILD_DIR}/nso.cpp" "${nso_source}")
     list(REMOVE_ITEM core_sources loader/nso.cpp)
     list(APPEND core_sources "${PORT_BUILD_DIR}/nso.cpp")

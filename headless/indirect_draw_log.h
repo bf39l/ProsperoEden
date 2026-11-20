@@ -59,7 +59,9 @@ struct State {
     std::array<Record, 32> history{};
     std::array<TrackedWrite, 128> writes{};
     std::uint64_t write_sequence = 0, producer_sequence = 0;
-    std::uint64_t watched_compute = 0, counter_probes = 0;
+    struct CounterWatch { std::uint64_t shader = 0, probes = 0; };
+    std::array<CounterWatch, 8> counter_watches{};
+    std::uint64_t counter_probes = 0, indirect_reads = 0;
     Producer producer{};
     Binding binding{};
     Context* context = nullptr;
@@ -115,16 +117,37 @@ inline TrackedWrite LastTrackedWrite(std::uint64_t cpu) {
 // hard-coding one game's shader hash or logging every descriptor of every game.
 inline void WatchCounterProducer(const TrackedWrite& write) {
     auto& state = Local();
-    if (!state.watched_compute && write.producer.compute_shader) {
-        state.watched_compute = write.producer.compute_shader; state.counter_probes = 0;
-        std::fprintf(stderr, "EDEN_COUNTER_WATCH cs=%llx\n", static_cast<unsigned long long>(state.watched_compute));
+    const auto shader = write.producer.compute_shader;
+    if (!shader) return;
+    for (const auto& watch : state.counter_watches) {
+        if (watch.shader == shader) return;
+    }
+    for (auto& watch : state.counter_watches) {
+        if (watch.shader) continue;
+        watch = {shader, 0};
+        std::fprintf(stderr, "EDEN_COUNTER_WATCH cs=%llx\n", static_cast<unsigned long long>(shader));
+        return;
     }
 }
 inline bool CounterProbeWanted(std::uint64_t shader) {
     auto& state = Local();
-    if (!shader || shader != state.watched_compute) return false;
-    const auto n = ++state.counter_probes;
-    return n <= 4 || (n & (n - 1)) == 0;
+    if (!shader) return false;
+    for (auto& watch : state.counter_watches) {
+        if (watch.shader != shader) continue;
+        const auto n = ++watch.probes;
+        state.counter_probes = n;
+        return n <= 4 || (n & (n - 1)) == 0;
+    }
+    return false;
+}
+// Observe the fixed read path without fetching argument data or waiting for the GPU.
+inline void IndirectDispatchRead(std::uint64_t gpu, bool gpu_dirty) {
+    auto& state = Local();
+    const auto n = ++state.indirect_reads;
+    if (n > 8 && (n & (n - 1)) != 0) return;
+    std::fprintf(stderr,
+        "EDEN_COMPUTE_INDIRECT_READ seq=%llu gpu=%#llx bytes=12 gpu_dirty=%u ownership=preserved upload_reorder=protected\n",
+        static_cast<unsigned long long>(n), static_cast<unsigned long long>(gpu), unsigned(gpu_dirty));
 }
 struct CounterBinding {
     std::uint64_t shader = 0, gpu = 0, cpu = 0;
@@ -154,8 +177,8 @@ inline void ProbeCounterBinding(const CounterBinding& b) {
     }
     const auto& p = overlap.producer;
     std::fprintf(stderr,
-        "EDEN_COUNTER_UPSTREAM probe=%llu slot=%u write_seq=%llu writer_kind=%s writer_work=%llu writer_cs=%llx writer_key=%llx va=%llx vb=%llx tc=%llx te=%llx gs=%llx fs=%llx binding=%s binding_stage=%u binding_slot=%u cpu=%#llx+%llu overlap_intent_only=1\n",
-        static_cast<unsigned long long>(state.counter_probes), b.slot,
+        "EDEN_COUNTER_UPSTREAM probe=%llu cs=%llx slot=%u write_seq=%llu writer_kind=%s writer_work=%llu writer_cs=%llx writer_key=%llx va=%llx vb=%llx tc=%llx te=%llx gs=%llx fs=%llx binding=%s binding_stage=%u binding_slot=%u cpu=%#llx+%llu overlap_intent_only=1\n",
+        static_cast<unsigned long long>(state.counter_probes), static_cast<unsigned long long>(b.shader), b.slot,
         static_cast<unsigned long long>(overlap.sequence), p.kind, static_cast<unsigned long long>(p.work),
         static_cast<unsigned long long>(p.compute_shader), static_cast<unsigned long long>(p.key),
         static_cast<unsigned long long>(p.stages[0]), static_cast<unsigned long long>(p.stages[1]),
@@ -163,6 +186,9 @@ inline void ProbeCounterBinding(const CounterBinding& b) {
         static_cast<unsigned long long>(p.stages[4]), static_cast<unsigned long long>(p.stages[5]),
         overlap.binding.kind, overlap.binding.stage, overlap.binding.slot,
         static_cast<unsigned long long>(overlap.cpu), static_cast<unsigned long long>(overlap.size));
+    // Follow input writers too: the final argument builder may only copy a bad counter.
+    // Eight unique shaders maximum, with an independent sampling budget for each.
+    if (b.read) WatchCounterProducer(overlap);
 }
 inline bool Suspicious(std::uint32_t count, std::uint32_t instances) {
     // Diagnostic threshold only: deliberately below the existing draw rejection limit.

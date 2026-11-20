@@ -19,6 +19,10 @@ def adapt(relative, destination, replacements):
 adapt('src/core/frontend/emu_window.h', 'include/core/frontend/emu_window.h',
       [('    Xcb,', '    Xcb,\n    PS5,')])
 adapt('src/video_core/renderer_vulkan/vk_rasterizer.cpp', 'vulkan_rasterizer.cpp', [
+    ('        buffer->MarkUsage(offset, 12);\n',
+     '        buffer->MarkUsage(offset, 12);\n'
+     '        ::Eden::IndirectDrawLog::IndirectDispatchRead(\n'
+     '            *indirect_address, gpu_memory->IsMemoryDirty(*indirect_address, 12));\n'),
     # Compute synchronization (dev_vulkan.h compute_barriers): indirect
     # dispatches returned before the pre-dispatch barrier, and no barrier made a dispatch's
     # writes visible to later indirect arguments, vertex/index fetch, shaders or copies.
@@ -74,7 +78,7 @@ void RasterizerVulkan::DispatchCompute() {"""),
     # when the guest enables occlusion counting.
     ('const bool can_defer_clear = ENABLE_DEFERRED_CLEAR &&',
      'const bool can_defer_clear = ENABLE_DEFERRED_CLEAR && !regs.zpass_pixel_count_enable &&'),
-    ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"'),
+    ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n#include "indirect_draw_log.h"'),
     # Guest threads take the cache locks here (tracked-page writes, flush-area reads).
     ('bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {',
      'bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {\n    ::Eden::Performance::Timer guest_write_timer(::Eden::Performance::guest_cpu_write);'),

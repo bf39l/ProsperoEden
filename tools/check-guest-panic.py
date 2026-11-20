@@ -19,22 +19,41 @@ with tempfile.TemporaryDirectory() as tmp:
     a = derived.index('    if (!notification_only && !system.IsShuttingDown() && !system.DebuggerEnabled() &&')
     b = derived.index('    const bool should_break',a)
     assert derived.index('system.CurrentPhysicalCore().LogBacktrace') < a
+    assert derived.index('::Eden::PanicEvidence') < derived.index('::Eden::RecordGuestPanic')
+    assert '#include "core/hle/kernel/physical_core.h"' in derived
     code = r'''#include "guest_fault.h"
 #include <cassert>
 #include <thread>
 #include <vector>
 #include <limits>
-using u32=unsigned;
+using u32=unsigned; using u64=std::uint64_t;
 enum class BreakReason { Panic, Assert, CppException, User, PreLoadDll };
+struct ThreadContext { u64 pc=0x1234,lr=0x5678,sp=0x8000,fp=0; };
+struct Memory {
+ bool IsValidVirtualAddressRange(u64,u64){return false;}
+ u32 Read32(u64){assert(false);return 0;}
+ u64 Read64(u64){assert(false);return 0;}
+};
+struct Arm {void GetContext(ThreadContext&){};};
+struct Process {
+ Arm arm;Memory memory;
+ Arm* GetArmInterface(unsigned){return &arm;}
+ Memory& GetMemory(){return memory;}
+};
 struct System {
  bool shutdown=false, debugger=false;
+ Process process;
  bool IsShuttingDown() {return shutdown;}
  bool DebuggerEnabled() {return debugger;}
  System& Kernel() {return *this;}
+ System& CurrentPhysicalCore(){return *this;}
+ unsigned CoreIndex(){return 0;}
 };
+Process* GetCurrentProcessPointer(System& s){return &s.process;}
 struct Thread { unsigned GetThreadId(){return 81;} };
 Thread GetCurrentThread(System&) {return {};}
 void Check(System& system, BreakReason break_reason, bool notification_only) {
+ u64 info1=0, info2=0;
 ''' + derived[a:b] + r'''}
 int main() {
  System s;
@@ -61,6 +80,23 @@ int main() {
  Eden::FaultCallSite(0x1010,valid,read,emit);assert(reads==7&&emits==8);
  for(auto lr:{0ull,4ull,15ull,0x1001ull,~0ull-3}) Eden::FaultCallSite(lr,valid,read,emit);
  assert(reads==7&&emits==8);
+ // Panic evidence is bounded even with a cyclic or malicious guest frame chain.
+ unsigned reads32=0, reads64=0; std::vector<std::string> lines;
+ auto panic_valid=[](u64 at,u64 size){return at>=0x8000&&at+size<=0x9000;};
+ auto panic_read32=[&](u64 at){assert(at==0x8000);++reads32;return 0x2a2u;};
+ auto panic_read64=[&](u64 at){++reads64;return at==0x8010?0x8010ull:0x1234ull;};
+ auto panic_emit=[&](const char* line){lines.emplace_back(line);};
+ Eden::PanicEvidence(0x8000,4,{1,2,0x8000,0x8010},panic_valid,panic_read32,panic_read64,panic_emit);
+ assert(reads32==1&&reads64==2&&lines.size()==4);
+ assert(lines[1]=="EDEN_GUEST_PANIC_RESULT value=000002a2");
+ assert(lines.back()=="EDEN_GUEST_PANIC_CONTEXT_END");
+ for(auto fp:{0ull,0x8001ull,0x7ff0ull,~0ull-7})
+  Eden::PanicEvidence(~0ull,4,{1,2,0x8000,fp},panic_valid,panic_read32,panic_read64,panic_emit);
+ assert(reads32==1&&reads64==2);
+ reads64=0;
+ Eden::PanicEvidence(0,0,{1,2,0x8000,0x8010},panic_valid,panic_read32,
+  [&](u64 at){++reads64;return at+16;},panic_emit);
+ assert(reads64==48); // strict 24-frame cap
 }
 '''
     cpp=p/'test.cpp';exe=p/'test';cpp.write_text(code)

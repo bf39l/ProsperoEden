@@ -71,7 +71,7 @@ int main() {
         assert(record.tracked_write[1].sequence == 1 && record.tracked_write[1].needs_sync);
         assert(record.tracked_write[1].producer.compute_shader == 0xabcdef);
         assert(record.tracked_write[1].binding.slot == 3);
-        assert(D::Local().watched_compute == 0xabcdef);
+        assert(D::Local().counter_watches[0].shader == 0xabcdef);
         assert(!D::CounterProbeWanted(0x123456));
         assert(D::CounterProbeWanted(0xabcdef));
         D::CounterBinding binding{};
@@ -81,6 +81,29 @@ int main() {
         unsigned probes = 1;
         for (int n = 1; n < 1000000; ++n) probes += D::CounterProbeWanted(0xabcdef);
         assert(probes == 4 + 17);
+
+        // A reader's upstream producer is followed, but write-only overlap is not.
+        {
+            D::ProducerScope producer{"compute", 0, {}, 0x123456};
+            D::GpuWriteTracked(0x104004, 4, true);
+        }
+        D::ProbeCounterBinding(binding);
+        assert(!D::CounterProbeWanted(0x123456));
+        binding.read = true;
+        D::ProbeCounterBinding(binding);
+        assert(D::CounterProbeWanted(0x123456));
+        assert(D::Local().counter_probes == 1);
+        D::ProbeCounterBinding(binding); // Duplicate writer cannot reset its sampling budget.
+        assert(D::CounterProbeWanted(0x123456));
+        assert(D::Local().counter_probes == 2);
+        for (unsigned i = 1; i < 20; ++i) {
+            D::TrackedWrite w{}; w.producer.compute_shader = i;
+            D::WatchCounterProducer(w);
+        }
+        assert(D::Local().counter_watches.back().shader == 6);
+        assert(!D::CounterProbeWanted(7));
+        for (unsigned i = 0; i < 1000000; ++i) D::IndirectDispatchRead(0x4000, true);
+        assert(D::Local().indirect_reads == 1000000);
 
         // No extra ownership queries for ordinary draws; no external read API exists in Memory.
         const unsigned queries = memory.queries;
@@ -111,6 +134,7 @@ int main() {
     {
         D::ContextScope context{0xe00, segments, false, memory};
         assert(D::Local().sequence == 0 && D::Local().suspicious == 0 && D::Local().write_sequence == 0);
+        assert(D::Local().counter_watches[0].shader == 0 && D::Local().indirect_reads == 0);
         const unsigned before = memory.queries;
         for (int n = 0; n < 1000000; ++n) { D::DrawScope trace{"repeat", p, 1, ~std::uint32_t{0}}; }
         assert(D::Local().suspicious == 1000000);
@@ -150,7 +174,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert 'kind=accepted-after-rejections' in result.stderr
     assert 'cpu=0x104004' in result.stderr
     assert 'EDEN_DRAW_PRODUCER' in result.stderr and 'cs=abcdef' in result.stderr
-    assert 'EDEN_COUNTER_UPSTREAM probe=1 slot=4 write_seq=1 writer_kind=compute' in result.stderr
+    assert 'EDEN_COUNTER_UPSTREAM probe=1 cs=abcdef slot=4 write_seq=1 writer_kind=compute' in result.stderr
+    assert result.stderr.count('EDEN_COMPUTE_INDIRECT_READ ') == 8 + 16
     assert 'writer_cs=abcdef' in result.stderr
     assert 'binding=compute-storage stage=0 slot=3 byte_offset=4 intent_only=1' in result.stderr
     if len(sys.argv) > 1:
@@ -263,6 +288,10 @@ int main() {
         vulkan = tmp/'vulkan'
         vulkan.mkdir()
         subprocess.run([sys.executable, str(root/'tools/prepare-vulkan-port.py'), str(eden), str(vulkan)], check=True)
+        rasterizer = (vulkan/'vulkan_rasterizer.cpp').read_text()
+        assert '#include "indirect_draw_log.h"' in rasterizer
+        assert 'IndirectDispatchRead(' in rasterizer
+        assert 'buffer->MarkUsage(offset, 12);' in rasterizer
         buffer = (vulkan/'vulkan-cache/video_core/buffer_cache/buffer_cache.h').read_text()
         assert buffer.count('IndirectDrawLog::GpuWriteTracked(device_addr, size, needs_sync);') == 1
         assert '#include "indirect_draw_log.h"' in buffer

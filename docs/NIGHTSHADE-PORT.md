@@ -433,3 +433,186 @@ not a complete compatibility fix. Keep it on the development branch pending
 further testing; the guest object fault and the origin of corrupt draw counts
 remain unresolved. Private console logs and offline game analysis are retained
 locally under ignored `debug/` and are not part of this change.
+
+## GPU read ownership and asynchronous readback lifetime review (2026-11-20)
+
+The captured previous session has `EDEN_FF_RENDER_REQUEST_GUARD applied=1`,
+validated CPU indirect routing, reactive flushing OFF, and indirect compute-read
+ownership diagnostics from patch 25. It later records a guest panic with context
+and frames in stderr; no device-loss marker appears. The current session is the
+launcher/library scan. This capture does not establish the precise origin of
+the frozen picture, and zero-count draws with large unused instance words are
+no-op draws, not evidence of a newly submitted billion-instance draw.
+
+Patch `25-buffer-read-ownership.diff` preserves GPU ownership for indirect compute
+arguments and marks reads of reused vertex bindings, indirect commands/counts and
+compute arguments as used, so overlapping uploads cannot move ahead of them.
+The existing title/build-guarded guest workaround and earlier engine fixes remain.
+
+Patch `26-buffer-readback-lifetimes.diff` completes the readback bookkeeping:
+
+- Canceling a download removes or splits its queued copy records too. Otherwise
+  queuing another download of the same address makes the old canceled staging copy
+  eligible again, allowing it to overwrite guest memory and retire newer work.
+- Completing an old download retains dirty tracking for newer writes in BOTH the
+  uncommitted set and the committed-but-not-yet-staged queue. A fence can move a
+  new write into the committed queue before its own download has been staged.
+
+`tools/check-buffer-readback-lifetimes.py` executes the real cancellation and
+completion functions with the real engine RangeSet/OverlapRangeSet containers
+under ASan/UBSan. It covers full and partial cancellation, address reuse,
+nonuniform staging offsets, multiple batches, overlapping pending downloads,
+committed/uncommitted rewrites and empty completions. Old-code negative controls
+reproduce both failures. Ownership, indirect/provenance, integer-buffer,
+guest-panic and FF render-request checks pass. Vulkan and OpenGL rasterizer
+translation units compile with the actual PS5 flags and newly generated cache
+headers. The new checks are wired into normal build validation; full release
+build and PS5 retest are left to the developer.
+
+Upstream mirror master was checked at `8a482830170bfe5ae041817cc12c233a9f0c9d2e`.
+Its two commits after our pin concern gamescope dialog layout and Android disk
+shader-cache startup; neither affects the PS5 renderer. The pinned Eden revision
+remains `d85bad89248fcae68f812d7e1c937436261404cb` (no downgrade). These source-proven
+fixes are candidates for the remaining freeze/artifacts, not a verified complete
+FF compatibility fix. No new app version, deployment or shader-cache reset is
+required by patch 26 itself.
+
+## Per-allocation synchronous readback bounds (2026-11-20)
+
+Review after the patch-26 console build identified another independent engine
+bug. `DownloadMemory` visits each cached buffer intersecting a CPU read, but
+passed the entire CPU read range to each `DownloadBufferMemory` call. That
+function cleared the shared page tracker and iterated all GPU-dirty ranges
+before checking whether they belonged to the selected buffer. A read spanning
+two allocations could therefore build out-of-bounds source offsets against the
+first allocation and consume the second allocation's dirty tracking too soon.
+
+`27-buffer-download-bounds.diff` clips a synchronous download to its buffer's
+actual allocation before tracker iteration, metadata cancellation or source-offset
+calculation. Disjoint/empty queries return immediately; the clipping avoids an
+overflow-prone requested-end calculation. The existing page-granular download
+behavior inside the allocation is preserved. Full-buffer eviction and ordinary
+single-buffer reads retain their existing paths.
+
+`tools/check-buffer-download-bounds.py` executes the production download functions
+and page-table iterator with real engine interval containers and controlled
+page/staging/guest memory. Cases cover separate allocations with an unmapped gap,
+offset underflow, preserved dirty metadata outside the selected allocation,
+page-rounded partial reads, empty/disjoint requests and a huge requested size.
+The old-code negative control reproduces the invalid GPU copy. Tests use
+ASan/UBSan and run in normal build validation. Adjacent lifetime/ownership
+regressions and actual Vulkan/OpenGL PS5 compilation are checked as well.
+
+This source-proven bounds defect can produce invalid GPU copies or missing
+readbacks. It is not established as the cause of FF's particular freeze. The
+running patch-26 console test is unchanged; patch 27 is a separate candidate for
+a subsequent build. No engine pin/version update, console setting change,
+deployment or full application build was performed during this review.
+
+## Related external FF reports reviewed (2026-11-20)
+
+- https://github.com/eden-emulator/Issue-Reports/issues/751 reports an out-of-range
+  texture-handle assertion followed by `SurfaceFormat` rejecting `Invalid` on
+  Windows Vulkan. Our pinned `GenericEnvironment::ReadTextureInfo` still asserts
+  the TIC limit and then reads the descriptor unconditionally. Runtime texture
+  lookup (`VisitImageView`) already rejects out-of-range indices. This mismatch
+  is a separate hardening candidate; the preserved PS5 freeze capture does not
+  contain that assertion/format-error sequence, so it is not established as this
+  freeze's cause. No arbitrary format substitution was introduced in this review.
+- https://github.com/eden-emulator/Issue-Reports/issues/753 reports an Android
+  device/build-specific improvement from disabling asynchronous GPU emulation,
+  with outdoor flicker persisting. That option differs from async shader
+  compilation. This port currently sets `use_asynchronous_gpu_emulation=true`
+  in `headless/main.cpp`; switching off async shaders does not test the Android
+  workaround. The original report's final baseline has reactive flushing OFF;
+  turning it on did not resolve flicker in that report. Adreno/Turnip driver
+  choices do not apply to the PS5 AGC/RADV backend.
+
+These reports guide the next descriptor/synchronization investigation; they do
+not establish a shared cause for bad counters, invalid guest objects, visual
+artifacts and presentation freezes. The running console test/settings were left
+unchanged. The separately reproduced cross-allocation readback fix (patch 27)
+is ready for a later build after the current patch-26 test is assessed.
+
+## SMMU reclaim progress and lock ordering (2026-11-20)
+
+A subsequent no-crash-report exit captured a fatal guest panic in stderr after
+the engine log filled with 850,955 `Ran out of SMMU address space!` messages.
+This is guest GPU address-space mapping exhaustion, not evidence of physical RAM
+exhaustion. The engine log reached its limit before the final panic, so the exact
+fatal service call is not established by that file alone.
+
+`28-nvmap-smmu-reclaim.diff` corrects the allocator retry loop in `NvMap::PinHandle`.
+It previously checked the requesting handle's `d_address` before unmapping a
+queued candidate. New handles normally have zero there, so reclaim never ran.
+The loop also read `front()` without an empty check and had no exhaustion exit.
+It now reclaims the candidate mapping, removes stale unmapped entries, and returns
+failure when the queue is empty. Candidate selection releases the queue mutex
+before waiting for the handle mutex, then reacquires the queue mutex and checks
+that the candidate is still unpinned and queued. This preserves the handle->queue
+lock ordering used by unpin/free and avoids unmapping a concurrently repinned
+handle. Existing mapping reuse, low-area pins and preallocated heap paths remain.
+
+`tools/check-nvmap-smmu-reclaim.py` executes the actual pin/unmap functions under
+ASan/UBSan, including deterministic concurrent-repin validation and an old-code
+livelock control. Reclaim/retry, finite exhaustion, stale entries and fast paths
+pass; `nvmap.cpp` compiles with the real PS5 flags. The test is wired into normal
+build validation. This addresses a defect directly relevant to the new log;
+console retesting is required, and flicker/black lines remain unresolved.
+
+## Failed-map propagation and unbound DMA channels (2026-11-20)
+
+The 15:32:22 console crash occurred after 45m27s of app uptime: a host GPU-thread
+SIGSEGV at address `0x3a0`, symbolized as `DmaPusher::CallMethod`. Three 64 MiB
+SMMU allocations had returned failure shortly before it. The bounded patch-28
+failure path ran, but its callers accepted zero as a device address, followed by
+unmapped low-address device reads/writes. This is a different failure from GPU
+device loss, and physical-memory exhaustion is not established by this report.
+
+`29-nvmap-mapping-failure.diff` rejects zero pinned bases in GPU MapBufferEx,
+sparse Remap and video MapBuffer before installing mappings or adding offsets.
+Ordinary GPU mapping setup releases its pin if later validation/allocation fails
+or throws. A partially failed video batch unpins its earlier entries and clears
+their returned addresses. These operations return InsufficientMemory rather than
+claiming success with an invalid address.
+
+`30-dma-unbound-channel.diff` validates the engine pointer before either single
+or multi DMA dispatch accesses it. Invalid commands log their subchannel, method
+and command-list address, then throw a runtime_error. The existing GPU worker
+exception boundary reports a session failure; valid command handling remains.
+
+Production-code ASan/UBSan tests cover failed bases with nonzero offsets,
+normal/error/exception pin ownership, remap checks, partial video batch rollback,
+all eight unbound DMA channels, and valid sink/direct/puller dispatch. The SMMU
+reclaim regression continues to pass, and all three changed units compile with
+real PS5 flags. Checks are wired into normal build validation. The full build and
+console test remain the developer's step.
+
+The underlying eventual exhaustion of active mappings remains under investigation.
+These corrections prevent unsafe use of failure results and host null crashes;
+a genuine allocation failure can still stop the guest game. They do not establish
+a fix for FF's remaining flicker or black lines.
+
+## Fixed-map pin replacement lifetime (2026-11-20)
+
+The next capture records a 128 MiB mapping failure at 611.045 s followed by a
+guest panic and return to the launcher, without the prior host null crash.
+The failed-map protections work, but mapping space still becomes exhausted.
+
+`31-fixed-mapping-pin-replacement.diff` addresses another source-proven lifetime
+bug in MapBufferEx: successful fixed mappings overwrite the record at a GPU
+address using insert_or_assign, but the old record's handle pin was never
+released. They also appended duplicate offsets to the allocation's mapping list.
+Replacement now releases the old pin after successful GMMU mapping and retains
+one allocation-list entry. Same-handle replacements retain one reference; another
+independent GPU mapping still owns its own reference. Existing post-pin failure
+rollback remains in place and does not release an unchanged old mapping.
+
+`tools/check-fixed-mapping-pins.py` runs the actual ownership block with
+ASan/UBSan: 1000 replacements, same/different handles, independent mappings,
+unique FreeSpace iteration and an old-code leak control. Failed-map and reclaim
+regressions continue to pass; the mapping unit is compiled with PS5 flags.
+This fixes a plausible source of progressive pinned-address exhaustion, but
+that exact sequence is not established in the console log. Sparse remap ownership
+and other mapping lifetimes may still need investigation. No full application
+build, deployment, pin/version change, commit or push was performed here.
