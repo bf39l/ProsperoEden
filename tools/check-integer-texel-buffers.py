@@ -42,7 +42,13 @@ with tempfile.TemporaryDirectory() as work:
     # no cached pixel-format entries for the sampled buffers.
     port = (root/'tools/prepare-vulkan-port.py').read_text()
     assert 'host_info.support_integer_texture_buffers = true;' in port
-    assert 'constexpr u32 CACHE_VERSION = 0x50530014;' in port
+    # Later compatible revisions must keep invalidating the pre-integer metadata
+    # format. Require the PS5 namespace and minimum revision, not one exact bump.
+    versions = re.findall(r'constexpr u32 CACHE_VERSION = (0x[0-9a-fA-F]+);', port)
+    assert len(versions) == 1, 'Expected one PS5 shader-cache revision'
+    version = int(versions[0], 16)
+    assert version & 0xffff0000 == 0x50530000, 'Missing PS5 cache namespace'
+    assert version >= 0x50530014, 'Cache revision predates integer texel metadata'
     assert 'eden_binding.integer = desc.is_integer;' in port
     code = r'''
 #include <array>
