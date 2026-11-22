@@ -56,7 +56,12 @@ with tempfile.TemporaryDirectory() as d:
  # Reconstruct the exact pre-patch header and demonstrate its undefined shift.
  old=p/'old/src/video_core/buffer_cache';old.mkdir(parents=True)
  (old/'usage_tracker.h').write_text((root/'src/video_core/buffer_cache/usage_tracker.h').read_text())
- subprocess.run(['patch','-s','-R','-p1','-d',str(p/'old'),'-i',str(repo/'tools/eden-patches/39-buffer-usage-range-masks.diff')],check=True)
+ for patch in reversed(sorted((repo/'tools/eden-patches').glob('*.diff'))):
+  if patch.name < '39-': continue
+  parts=patch.read_text().split('--- a/')
+  relevant=''.join('--- a/'+part for part in parts[1:] if part.startswith('src/video_core/buffer_cache/usage_tracker.h\n'))
+  if relevant:
+   subprocess.run(['patch','-s','-R','-p1','-d',str(p/'old')],input=relevant,text=True,check=True)
  subprocess.run(flags+['-I'+str(p/'old/src'),'-I'+str(root/'src'),str(cpp),'-o',str(exe)],check=True)
  result=subprocess.run([str(exe)],env={**os.environ,'UBSAN_OPTIONS':'halt_on_error=1'},capture_output=True,text=True)
  assert result.returncode!=0 and 'shift exponent 64' in result.stderr,result.stderr

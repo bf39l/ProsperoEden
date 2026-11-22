@@ -93,6 +93,15 @@ int main() {
  for(auto fp:{0ull,0x8001ull,0x7ff0ull,~0ull-7})
   Eden::PanicEvidence(~0ull,4,{1,2,0x8000,fp},panic_valid,panic_read32,panic_read64,panic_emit);
  assert(reads32==1&&reads64==2);
+ // The engine validity check can accept wrapped ranges; guard before calling it.
+ auto wrapped_valid=[](u64,u64){return true;};
+ unsigned wrapped_reads=0;
+ auto never32=[&](u64){++wrapped_reads;return 0u;};
+ auto never64=[&](u64){++wrapped_reads;return u64{0};};
+ Eden::PanicEvidence(~0ull-3,4,{1,2,~0ull-15,~0ull-15},wrapped_valid,never32,never64,panic_emit);
+ Eden::FaultCallSite(~0ull-15,wrapped_valid,never32,panic_emit);
+ assert(wrapped_reads==0);
+
  reads64=0;
  Eden::PanicEvidence(0,0,{1,2,0x8000,0x8010},panic_valid,panic_read32,
   [&](u64 at){++reads64;return at+16;},panic_emit);

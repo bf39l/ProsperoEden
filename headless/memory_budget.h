@@ -111,6 +111,9 @@ inline bool CachesShort(std::size_t caches_free) {
 // block under its 161 MiB texture array. A busy frame sends every one, as before. GPU thread only.
 inline constexpr unsigned long long kLightBackgroundBytes = 128ull << 20;
 inline unsigned long long astc_background_bytes = 0;
+inline bool LightBackgroundRoom(unsigned long long held, unsigned long long bytes) {
+    return bytes <= kLightBackgroundBytes && held <= kLightBackgroundBytes - bytes;
+}
 inline bool LightBackgroundRoom(unsigned long long bytes) {
     return astc_background_bytes + bytes <= kLightBackgroundBytes;
 }

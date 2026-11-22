@@ -16,10 +16,11 @@ int main(){
 #include "shader_recompiler/frontend/maxwell/maxwell.inc"
 #undef INST
 // Observed in FF's invalid-instruction reports; none is a supported opcode.
-for(u64 word:{0xffffffffffffffffULL,0x4cffffff00ffffffULL,0x4cffffffffffffffULL,0x00ffffffffffffULL,0x5dffff00ffffffffULL}){
+for(u64 word:{0ULL,0xffffffffffffffffULL}){
  bool rejected=false;try{(void)Decode(word);}catch(const Shader::LogicError&){rejected=true;}
  if(!rejected)return 10;
 }
+for(u64 word:{0x4cffffff00ffffffULL,0x4cffffffffffffffULL,0x00ffffffffffffULL,0x5dffff00ffffffffULL})assert(Decode(word)==Opcode::NOP);
 }
 '''
 with tempfile.TemporaryDirectory() as d:

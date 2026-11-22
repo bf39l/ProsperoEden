@@ -16,6 +16,7 @@
 #include "reactive_flush_log.h"
 #include "indirect_draw_log.h"
 #include "guest_fault.h"
+#include "memory_layout_guard.h"
 #include "jit_list.h"
 #include "boot_trace.h"
 #ifdef PS5_NATIVE
@@ -858,6 +859,17 @@ int main(int argc, char** argv) {
         Settings::values.dma_accuracy.SetValue(Settings::DmaAccuracy::Default);
         Settings::values.memory_layout_mode = Settings::MemoryLayout::Memory_4Gb;
         // A development run that names jit_list in dev-settings decides the block list by itself.
+        [[maybe_unused]] bool dev_gpu_async = true, dev_layout_guard_off = false;
+        // Narrow diagnostic switches also work in release packages. Other
+        // development-only settings retain their existing build-time gates.
+        {
+            std::ifstream gpu_settings(Eden::AppFile("dev-settings.txt"));
+            for (std::string token; gpu_settings >> token;) {
+                if (token == "gpu_async=off") dev_gpu_async = false;
+                if (token == "gpu_async=on") dev_gpu_async = true;
+                if (token == "layout_guard=off") dev_layout_guard_off = true;
+            }
+        }
         [[maybe_unused]] bool dev_block_list = false;  // read where a session applies its settings
         [[maybe_unused]] int dev_vertex_input = -1;  // likewise: dev-settings vertex_input_dynamic=off/on
         [[maybe_unused]] bool dev_cram_on = true, dev_cram_scan = true, dev_cram_dedup = false, dev_cram_fine = false;
@@ -1317,16 +1329,6 @@ int main(int argc, char** argv) {
             // same way, so the mod's heap is there. Above 4 GiB the guest's memory is the block
             // backed where the kernel uses it (src/memory_pages.cpp), so the pool below only has to
             // hold what a session touches, not the whole of it.
-            Settings::values.memory_layout_mode =
-                speed.memory_layout == 1 ? Settings::MemoryLayout::Memory_6Gb
-                : speed.memory_layout == 2 ? Settings::MemoryLayout::Memory_8Gb
-                                           : Settings::MemoryLayout::Memory_4Gb;
-            Eden::Report("launch",
-                         ("Memory layout: " + std::string{Eden::kMemoryLayoutKeys[speed.memory_layout]} +
-                          " (" + std::to_string(Eden::kMemoryLayoutGib[speed.memory_layout]) +
-                          " GiB), direct memory pool " +
-                          std::to_string(sceKernelGetDirectMemorySize() >> 20) + " MiB")
-                             .c_str());
             // Settings > Performance > Speed limit: how fast the game may run, as a percentage of
             // the console it was made for. Eden's vsync clock comes that much sooner (vi/conductor.cpp
             // on several cores), so a game that waits for it runs faster: one locked to 30 FPS can
@@ -1378,6 +1380,18 @@ int main(int argc, char** argv) {
             const auto& mods_off = switched.mods_off;
             const std::string mods = Eden::Mods::Summary(all_mods, mods_off, cheats_on);
             Settings::values.disabled_addons[title] = mods_off;
+            const bool mods_on = std::any_of(all_mods.begin(), all_mods.end(), [&](const Eden::Mods::Mod& mod) {
+                return !Eden::Mods::CheatsOnly(mod) &&
+                       std::find(mods_off.begin(), mods_off.end(), mod.name) == mods_off.end();
+            });
+            const int layout = Eden::MemoryLayoutGuard::Layout(title, speed.memory_layout, mods_on,
+                                                               dev_layout_guard_off);
+            Settings::values.memory_layout_mode =
+                layout == 1 ? Settings::MemoryLayout::Memory_6Gb
+                : layout == 2 ? Settings::MemoryLayout::Memory_8Gb
+                              : Settings::MemoryLayout::Memory_4Gb;
+            Eden::Report("launch", ("Memory layout: " + std::to_string(Eden::kMemoryLayoutGib[layout]) +
+                         " GiB" + (layout != speed.memory_layout ? " (unmodded title compatibility guard)" : "")).c_str());
             Eden::Report("launch", ("Mods: " + mods).c_str());
             Eden::Crash::SetSession("game " + std::filesystem::path(guest).filename().string() + " (" + title_id +
                                     "), " + Eden::BackendName(backend) + ", resolution " +
@@ -1412,7 +1426,9 @@ int main(int argc, char** argv) {
         }
         // The PS5 build bounds Eden's GPU command queue below, so the CPU and renderer can run in
         // parallel without accumulating the multi-frame controller lag of the upstream queue.
-        Settings::values.use_asynchronous_gpu_emulation = true;
+        Settings::values.use_asynchronous_gpu_emulation = dev_gpu_async;
+        if (game) Eden::Report("launch", dev_gpu_async ? "GPU emulation: asynchronous"
+                                                       : "GPU emulation: synchronous (diagnostic)");
 #ifdef EDEN_PS5_OPENGL
         Settings::values.use_disk_shader_cache = game;
 #else
