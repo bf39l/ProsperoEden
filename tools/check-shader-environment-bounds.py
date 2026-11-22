@@ -16,6 +16,7 @@ fixture=r'''
 #include <stdexcept>
 using u32=uint32_t;using u64=uint64_t;using GPUVAddr=u64;
 #define ASSERT(x) assert(x)
+#define LOG_ERROR(...) ((void)0)
 namespace Shader{struct LogicError:std::runtime_error{template<class...T>LogicError(const char*s,T&&...):runtime_error(s){}};}
 namespace Tegra::Texture{
 struct TICEntry{u32 word;};
@@ -42,7 +43,7 @@ assert(m.reads==reads);
 for(u32 offset:{13u,15u,16u,std::numeric_limits<u32>::max()}){assert(ge.ReadCbufValue(0,offset)==0);assert(ce.ReadCbufValue(0,offset)==0);}
 assert(m.reads==reads);
 GenericEnvironment env{&m};assert(env.ReadTextureInfo(0x20000,7,false,7).word==42);assert(m.address==0x2001c);
-reads=m.reads;refused([&]{env.ReadTextureInfo(0x20000,7,false,8);});assert(m.reads==reads);
+reads=m.reads;assert(env.ReadTextureInfo(0x20000,7,false,8).word==0);assert(m.reads==reads);
 }
 '''
 with tempfile.TemporaryDirectory() as d:

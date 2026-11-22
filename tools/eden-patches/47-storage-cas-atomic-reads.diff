@@ -1,0 +1,30 @@
+--- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
++++ b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
+@@ -404,12 +404,11 @@
+     ctx.AddLabel(continue_block);
+     const Id word_pointer{is_struct ? ctx.OpAccessChain(element_pointer, base, zero, index)
+                                     : ctx.OpAccessChain(element_pointer, base, index)};
+-    // A storage buffer comes in as a pointer parameter, which does not carry the variable's
+-    // Coherent decoration to the load: read the word at device scope on every attempt, or a stale
+-    // cached copy fails the exchange forever.
++    // Compare-exchange operates atomically at device scope. Read storage through
++    // the same atomic path, including pointer parameters without variable decorations.
+     const auto load_word{[&](Id type) {
+         return is_shared ? ctx.OpLoad(type, word_pointer)
+-                         : ctx.OpLoad(type, word_pointer, spv::MemoryAccessMask::Volatile);
++                         : ctx.OpAtomicLoad(type, word_pointer, scope_id, zero);
+     }};
+     if (value_type.value == ctx.F32[2].value) {
+         const Id u32_value{load_word(ctx.U32[1])};
+@@ -939,7 +938,10 @@
+     OpBranch(body_label);
+ 
+     AddLabel(body_label);
+-    const Id expected_value{OpLoad(U32[1], pointer)};
++    // This word is concurrently modified by compare-exchange. Read it atomically
++    // on every attempt; an ordinary load can keep a stale cached expected value.
++    const Id expected_value{
++        OpAtomicLoad(U32[1], pointer, scope_device, ordering_relaxed)};
+     const Id desired_value{OpBitFieldInsert(U32[1], expected_value, value, bit_offset, bit_count)};
+     const Id actual_value{OpAtomicCompareExchange(U32[1], pointer, scope_device, ordering_relaxed,
+                                                   ordering_relaxed, desired_value, expected_value)};

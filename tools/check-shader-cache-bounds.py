@@ -17,6 +17,16 @@ a=vk.index('        const size_t expected_envs');end=vk.index('\n        }',a)+l
 assert key_guard in gl
 vector_line=next(l.strip() for l in vk.splitlines() if 'static_vector<Shader::Environment*' in l)
 assert vector_line in gl and 'Maxwell::MaxShaderProgram' in vector_line
+# Also exercise the loader the PS5 port actually generates, not just raw Eden.
+derived = root.parent/'native-local/headless/vk_pipeline_cache_cost.cpp'
+if derived.exists():
+ port = derived.read_text(); a=port.index('    auto load_graphics{'); b=port.index('    // Reads the file',a); actual=port[a:b]
+ start=actual.index('        const auto expected_envs'); end=actual.index('\n        }',start)+len('\n        }')
+ key_guard=actual[start:end]
+ assert actual.index('expected_envs != envs.size()') < actual.index('loader->Note(') < actual.index('workers.QueueWork(')
+ vector_line=next(l.strip() for l in actual.splitlines() if 'static_vector<Shader::Environment*' in l)
+ assert 'Maxwell::MaxShaderProgram' in vector_line
+
 count=int(re.search(r'MaxShaderProgram = (\d+)',(root/'src/video_core/engines/maxwell_3d.h').read_text())[1]);assert count==6
 fixture=r'''
 #include <algorithm>

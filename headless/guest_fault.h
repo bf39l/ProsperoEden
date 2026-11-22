@@ -44,13 +44,13 @@ inline void PanicEvidence(std::uint64_t info1, std::uint64_t info2, PanicContext
         static_cast<unsigned long long>(ctx.sp), static_cast<unsigned long long>(ctx.fp),
         static_cast<unsigned long long>(info1), static_cast<unsigned long long>(info2));
     emit(line);
-    if (info1 && info2 == 4 && info1 <= UINT64_MAX - 3 && valid(info1, 4)) {
+    if (info1 && info2 == 4 && info1 <= UINT64_MAX - 4 && valid(info1, 4)) {
         std::snprintf(line, sizeof(line), "EDEN_GUEST_PANIC_RESULT value=%08x", unsigned(read32(info1)));
         emit(line);
     }
     for (unsigned n = 0; n < 24; ++n) {
         if (!ctx.fp || (ctx.fp & 7) || ctx.fp < ctx.sp || ctx.fp - ctx.sp > 1024 * 1024 ||
-            ctx.fp > UINT64_MAX - 15 || !valid(ctx.fp, 16)) break;
+            ctx.fp > UINT64_MAX - 16 || !valid(ctx.fp, 16)) break;
         const auto next = read64(ctx.fp);
         const auto lr = read64(ctx.fp + 8);
         std::snprintf(line, sizeof(line), "EDEN_GUEST_PANIC_FRAME index=%u fp=%#llx lr=%#llx",
@@ -66,7 +66,7 @@ inline void PanicEvidence(std::uint64_t info1, std::uint64_t info2, PanicContext
 // invalid branch target, dereference guest object pointers, or scan arbitrary memory.
 template<class Valid, class Read, class Emit>
 inline void FaultCallSite(std::uint64_t lr, Valid valid, Read read, Emit emit) {
-    if (lr < 16 || (lr & 3) != 0 || lr > UINT64_MAX - 12) return;
+    if (lr < 16 || (lr & 3) != 0 || lr > UINT64_MAX - 16) return;
     for (std::uint64_t address = lr - 16; address < lr + 16; address += 4) {
         char line[128];
         if (!valid(address, 4)) {

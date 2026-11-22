@@ -97,6 +97,7 @@ python3 -B "$root/tools/check-guest-panic.py" "$scratch/source"
 python3 -B "$root/tools/check-guest-span.py"
 python3 -B "$root/tools/check-indexed-storage-images.py"
 python3 -B "$root/tools/check-integer-texel-buffers.py"
+python3 -B "$root/tools/check-texel-descriptor-merge.py" "$scratch/source"
 python3 -B "$root/tools/check-dma-fill.py"
 python3 -B "$root/tools/check-guest-clock.py"
 python3 -B "$root/tools/check-staging-buffers.py" "$scratch/source/src" "$scratch/native-local/headless/vulkan_staging_buffer_pool.cpp"
@@ -114,6 +115,8 @@ python3 -B "$root/tools/check-native-indirect-guard.py" "$scratch/source"
 python3 -B "$root/tools/check-buffer-read-ownership.py" "$scratch/source"
 python3 -B "$root/tools/check-storage-binding-span.py" "$scratch/source"
 python3 -B "$root/tools/check-buffer-view-scaling.py" "$scratch/source"
+python3 -B "$root/tools/check-storage-cas-progress.py" "$scratch/source"
+python3 -B "$root/tools/check-flat-allocator-reuse.py" "$scratch/source"
 python3 -B "$root/tools/check-buffer-usage-tracker.py" "$scratch/source"
 python3 -B "$root/tools/check-gc-prefetch-budget.py" "$scratch/source"
 python3 -B "$root/tools/check-buffer-readback-lifetimes.py" "$scratch/source"
@@ -127,6 +130,11 @@ python3 -B "$root/tools/check-gpu-mapping-bounds.py" "$scratch/source"
 python3 -B "$root/tools/check-sparse-remap-bounds.py" "$scratch/source"
 python3 -B "$root/tools/check-sparse-pin-ownership.py" "$scratch/source"
 python3 -B "$root/tools/check-shader-environment-bounds.py" "$scratch/source"
+python3 -B "$root/tools/check-rasterizer-read-context.py" "$scratch/source"
+python3 -B "$root/tools/check-texture-transcode.py" "$scratch/source"
+python3 -B "$root/tools/check-shader-discovery-scan.py" "$scratch/native-local/headless/shader_environment.cpp"
+python3 -B "$root/tools/check-nightshade-audio-queue.py" "$scratch/native-local/headless/sink_stream.cpp" "$scratch/source/src"
+
 python3 -B "$root/tools/check-shader-error-reporting.py" "$scratch/source"
 python3 -B "$root/tools/check-shader-invalid-instructions.py" "$scratch/source"
 python3 -B "$root/tools/check-shader-cache-bounds.py" "$scratch/source"
@@ -155,3 +163,9 @@ fi
 
 python3 -B tools/check-hud.py
 python3 -B tools/check-game-frame-summary.py
+
+if [[ ${EDEN_PS5_VULKAN:-OFF} == ON ]]; then
+python3 -B "$root/tools/check-astc-policy.py" "$scratch/source"
+python3 -B "$root/tools/check-async-lifetimes.py" "$scratch/source"
+EDEN_SHADER_BUILD="$scratch/native-local" python3 -B "$root/tools/check-storage-image-spirv.py"
+fi

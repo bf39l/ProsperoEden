@@ -1062,3 +1062,81 @@ the prior nearly 4 GiB allocation failure. It also contains an earlier mapping
 block-counter assertion, an invalid Maxwell instruction and unimplemented puller
 commands. The guard fixes the concrete null-parent scaling defect; it does not
 establish the origin of those earlier warnings or rule out additional failures.
+
+### Atomic reads in storage compare-exchange retry loops (patch 47)
+
+The FF device-loss report at 00:50:13 has an incomplete GPU submission with normal
+recorded work sizes, rather than the earlier huge allocation or null-parent image
+exception. The batch snapshot cannot identify the exact shader instruction that
+stopped. Mapping its shader handles to Eden hashes is retained with private logs.
+
+Review found another stale-read risk in storage atomic emulation. The byte/halfword
+store fallback formed the expected value with a plain OpLoad through a pointer
+parameter, then retried a device-scoped compare-exchange. A cached old expected
+word can cause repeated failures after a competing update. Patch 47 uses a
+relaxed device-scoped OpAtomicLoad for that expected word. The generic storage
+counter/floating-point CAS helper likewise uses the atomic path instead of its
+previous Volatile ordinary load. Its workgroup branch is unchanged. No retry cap,
+shader bypass, arbitrary result substitution or engine downgrade is introduced.
+Native byte/halfword store paths are unchanged; the subword fix matters only when
+the fallback is selected.
+
+The regression compiles the actual helper bodies against the pinned Sirit library
+and validates a generated compute module with spirv-val for Vulkan 1.1. Both storage
+retry helpers emit atomic loads. The byte/halfword loop's emitted instructions are
+executed by a small test interpreter with stale ordinary-load caching and competing
+updates: the original subword helper fails to finish, while the fixed helper
+completes and preserves neighboring bits. The fixture uses a simple counter
+operation for the generic helper; it does not simulate the driver's floating-point
+arithmetic or GPU scheduling. Actual PS5 spirv_emit_context compilation passes.
+
+This is a candidate repair for a class of shader hangs, not proof that the captured
+FF batch executed the affected helper or that all device loss is resolved. A console
+rebuild and replay are required. Additional live logs contain an FF 32 MiB SMMU
+allocation failure with no reclaimable unpinned handles, followed by a guest panic;
+that is a separate unresolved mapping-capacity/ownership path. A subsequent panic
+explicitly occurred while the session was already stopping. Other title IDs also
+appear in the live log and must not be attributed to FF without session matching.
+
+### Reusable SMMU address-space allocation (patch 48)
+
+The later FF guest panic is preceded by PinHandle failing a 32 MiB SMMU allocation
+with no unpinned handles left to reclaim. Review and a production-allocator test
+found three concrete problems that can make allocated/reusable address accounting
+incorrect even when handle pin ownership is balanced:
+
+- The fallback gap search never considered the final free interval. After the
+  forward cursor reached the limit, space freed at the end could not be reused.
+- The forward skip over fixed mappings accepted a mapped or undersized interval,
+  potentially allocating across existing reservations.
+- Generic UnmapLocked stopped its erase before the last overwritten block when
+  the preceding interval was already free. Freeing the first of two adjacent
+  allocations could leave it marked mapped permanently.
+
+The allocator now searches only unmapped intervals, considers their final tail,
+retries earlier space when needed and checks capacity by subtraction to avoid
+address overflow. It retains its forward preference and mutex protection. Unmap
+includes the final overwritten block while preserving the following mapping.
+No SMMU limit, live pin count, guest allocation size or engine version is changed;
+genuinely full address spaces still return allocation failure.
+
+Tests use the actual address-space header and implementation. Each original
+failure has an independent control. Coverage includes 20,000 randomized occupancy
+checks, 2,000 full-space reuse cycles, fixed reservations, zero/oversized requests,
+64-bit overflow, contiguous physical tails and unmap notifications, plus the real
+34-bit SMMU width with a 32 MiB tail-reuse request. Tests pass under ASan/UBSan.
+Existing production NvMap reclaim and sparse pin-ownership regressions pass.
+Actual PS5 gpu_device_memory_manager, nvhost_as_gpu and core NvMap units compile.
+
+These are reproduced allocator defects consistent with the observed exhaustion,
+not proof that this console session encountered each exact layout. Together with
+patch 47 they are ready for a user build and gameplay replay. The separate GPU
+submission stall and other games' exits still require console validation; no
+claim of complete FF stability is made.
+
+### Nightshade 1.500.000 adoption
+
+The subsequent adoption branch reconciles the newer local snapshot and the issue 6
+audit against this fork's newer Eden pin. See
+[Nightshade 1.500.000 adoption review](NIGHTSHADE-1.500.000-ADOPTION.md) for each
+patch's disposition, FF technical leads, diagnostic comparison and validation.
