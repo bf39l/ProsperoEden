@@ -40,7 +40,7 @@ struct Maxwell3D {
   template<class... T> void DrawIndex(Maxwell3D&,Regs::PrimitiveTopology,u32,u32 count,u32,u32,u32 instances,T...){
    if(count && instances){++accepted;last_instances=instances;}
   }
- } draw_manager;
+ } draw_manager{};
  std::span<u32> words;bool repair=false;int refreshes=0,retries=0;
  u32 GetRegisterValue(u32){return 0xffffffffu;}
  void RefreshParameters(){++refreshes;}
