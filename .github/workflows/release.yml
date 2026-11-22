@@ -246,16 +246,6 @@ jobs:
           PY
           sha256sum -c SHA256SUMS
 
-      # Signed provenance: this ZIP was built by this workflow from this commit. Anyone can check a
-      # downloaded copy with `gh attestation verify <file> -R <owner>/<repo>`. For a tag and a manual
-      # run only: a pull request's run cannot sign (a fork), the nightly builds of main are there
-      # for their caches and not to be handed out, and a private repository's plan does not include it.
-      - name: Attest the release ZIP
-        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && !github.event.repository.private
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: dist/ProsperoEden-v*.zip
-
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.label.outputs.artifact }}
@@ -270,6 +260,32 @@ jobs:
           name: ${{ steps.label.outputs.artifact }}-symbols
           path: build/symbols/
           retention-days: ${{ github.ref_type == 'tag' && 90 || 7 }}
+
+      # Signed provenance: this ZIP was built by this workflow from this commit. Anyone can check a
+      # downloaded copy with `gh attestation verify <file> -R <owner>/<repo>`. For a tag and a manual
+      # run only: a pull request's run cannot sign (a fork), the nightly builds of main are there
+      # for their caches and not to be handed out, and a private repository's plan does not include it.
+      # Preserve artifacts above even if the external signing service is unavailable.
+      - name: Attest the release ZIP
+        id: attest_zip
+        continue-on-error: true
+        timeout-minutes: 5
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && !github.event.repository.private
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/ProsperoEden-v*.zip
+
+      - name: Wait before retrying attestation
+        if: steps.attest_zip.outcome == 'failure'
+        run: sleep 15
+
+      # The final attempt is mandatory: a signing failure still blocks the publish job.
+      - name: Retry release ZIP attestation
+        if: steps.attest_zip.outcome == 'failure'
+        timeout-minutes: 5
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/ProsperoEden-v*.zip
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
