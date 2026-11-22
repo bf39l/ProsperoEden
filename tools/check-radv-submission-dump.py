@@ -36,7 +36,7 @@ notes = []
 
 # 1. Eden's side: each pipeline's hashes beside its handle.
 port = (root / 'tools/prepare-vulkan-port.py').read_text()
-assert "'::Eden::PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes);'" in port
+assert "'::Eden::PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes, eden_spirv);'" in port
 assert "'::Eden::PipelineIdentity::Compute(*pipeline, shader_hash);'" in port
 assert '#include "pipeline_identity.h"' in port
 assert (root / 'headless/pipeline_identity.h').is_file()
@@ -515,6 +515,8 @@ int main() {
     ::Eden::PipelineIdentity::Compute(reinterpret_cast<VkPipeline_T*>(std::uintptr_t{0x80c41f100}),
                                       0xfedcba9876543210ull);
     ::Eden::PipelineIdentity::Compute(std::uint64_t{0x1234}, 1);
+    ::Eden::PipelineIdentity::Graphics(graphics, 1, {0, 2, 0, 0, 0, 3},
+                                       {0x1234, 0, 0, 0, 0x5678});
 }
 ''')
             binary = Path(folder) / 'identity'
@@ -531,6 +533,8 @@ int main() {
             'fs=6666666666666666',
             'EDEN_PIPELINE vk=0x80c41f100 compute cs=fedcba9876543210',
             'EDEN_PIPELINE vk=0x1234 compute cs=1',
+            'EDEN_PIPELINE vk=0x80c41f000 graphics key=1 va=0 vb=2 tc=0 te=0 gs=0 '
+            'fs=3 spv=vs:1234,fs:5678',
         ], eden
         assert re.fullmatch(r'vk=0x[0-9a-f]+', 'vk=' + handles['a']), handles
 
