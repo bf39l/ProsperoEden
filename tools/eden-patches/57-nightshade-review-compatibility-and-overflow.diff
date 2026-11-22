@@ -1,0 +1,98 @@
+--- a/src/shader_recompiler/ir_opt/texture_pass.cpp
++++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
+@@ -734,7 +734,7 @@
+           texture_descriptors{texture_descriptors_}, image_descriptors{image_descriptors_} {}
+ 
+     u32 Add(const TextureBufferDescriptor& desc) {
+-        return Add(texture_buffer_descriptors, desc, [&desc](const auto& existing) {
++        const u32 index{Add(texture_buffer_descriptors, desc, [&desc](const auto& existing) {
+             return desc.cbuf_index == existing.cbuf_index &&
+                    desc.cbuf_offset == existing.cbuf_offset &&
+                    desc.shift_left == existing.shift_left &&
+@@ -744,7 +744,9 @@
+                    desc.count == existing.count && desc.size_shift == existing.size_shift &&
+                    desc.has_secondary == existing.has_secondary && desc.mask == existing.mask &&
+                    desc.secondary_mask == existing.secondary_mask;
+-        });
++        })};
++        texture_buffer_descriptors[index].is_integer |= desc.is_integer;
++        return index;
+     }
+ 
+     u32 Add(const ImageBufferDescriptor& desc) {
+--- a/src/video_core/shader_environment.cpp
++++ b/src/video_core/shader_environment.cpp
+@@ -289,8 +289,9 @@
+                                                              bool via_header_index, u32 raw) {
+     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
+     if (handle.first > tic_limit) {
+-        throw Shader::LogicError("Texture descriptor index {} exceeds TIC limit {} (raw={:#x})",
+-                                 handle.first, tic_limit, raw);
++        LOG_ERROR(HW_GPU, "Texture descriptor index {} exceeds TIC limit {} (raw={:#x})",
++                  handle.first, tic_limit, raw);
++        return {};
+     }
+     const GPUVAddr descriptor_addr{tic_addr + handle.first * sizeof(Tegra::Texture::TICEntry)};
+     Tegra::Texture::TICEntry entry;
+--- a/src/shader_recompiler/frontend/maxwell/decode.cpp
++++ b/src/shader_recompiler/frontend/maxwell/decode.cpp
+@@ -46,7 +46,11 @@
+         return Opcode::name;
+ #include "maxwell.inc"
+ #undef INST
+-    throw Shader::LogicError("Invalid Maxwell instruction {:#016x}", insn);
++    if (insn == 0 || insn == ~u64{0}) {
++        throw Shader::LogicError("Invalid Maxwell instruction {:#016x}", insn);
++    }
++    ASSERT_MSG(false, "Invalid insn {:#016x}", insn);
++    return Opcode::NOP;
+ }
+ 
+ } // namespace Shader::Maxwell
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <limits>
+ #include <cstdio>
+ #include <exception>
+ #include <memory>
+@@ -216,7 +217,9 @@
+     async_downloads.ForEachInRange(device_addr, size,
+                                   [&](DAddr, DAddr, s32) { has_pending_download = true; });
+     if (has_pending_download) {
+-        const DAddr cancel_end = device_addr + size;
++        const DAddr cancel_end = size > (std::numeric_limits<DAddr>::max)() - device_addr
++                                     ? (std::numeric_limits<DAddr>::max)()
++                                     : device_addr + size;
+         for (auto& copies : pending_downloads) {
+             const size_t original_count = copies.size();
+             for (size_t i = 0; i < original_count; ++i) {
+--- a/src/video_core/buffer_cache/usage_tracker.h
++++ b/src/video_core/buffer_cache/usage_tracker.h
+@@ -5,6 +5,7 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ #pragma once
++#include <limits>
+ 
+ #include <algorithm>
+ #include <vector>
+@@ -31,6 +32,7 @@
+ 
+     void Track(u64 offset, u64 size) noexcept {
+         if (size == 0) return;
++        if (size > (std::numeric_limits<u64>::max)() - offset) return;
+         const size_t page = offset >> BUFFER_PAGE_SHIFT;
+         const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
+         if (page_end < page || page_end >= pages.size()) {
+@@ -50,6 +52,7 @@
+ 
+     [[nodiscard]] bool IsUsed(u64 offset, u64 size) const noexcept {
+         if (size == 0) return false;
++        if (size > (std::numeric_limits<u64>::max)() - offset) return true;
+         const size_t page = offset >> BUFFER_PAGE_SHIFT;
+         const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
+         if (page_end < page || page_end >= pages.size()) {

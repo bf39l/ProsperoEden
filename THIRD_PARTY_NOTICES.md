@@ -150,3 +150,18 @@ notices (Mihawk; Red Hat; Bas Nieuwenhuizen; Intel and other Mesa contributors);
 Oliv3rmoon authored the stall diagnostic additions. The standalone Nightshade
 diagnostic fixtures and this repository's adaptation scripts retain their
 GPL-3.0-or-later notices.
+
+### Nightshade 1.500.000 review and additional engine adaptations
+
+Additional changes and regression fixtures are adapted from the user-supplied
+`Nightshade-1.500.000` source snapshot, by
+[Oliv3rmoon](https://github.com/Oliv3rmoon) and the
+[Nightshade contributors](https://github.com/Oliv3rmoon/Nightshade), under
+GPL-3.0-or-later. These include storage-image arrays/atomics, audio underrun
+accounting/fade and guest PCM preservation, isolated rasterizer-read scratch,
+texture conversion completion/banding, bounded async decode payloads and lifetime
+ordering, shader discovery/retry, one-off target shader handling, emitted-SPIR-V
+provenance and the unmodded-title memory guard. Their issue 6 audit informed the
+loader, panic-boundary, integer metadata and compatibility corrections.
+See `docs/NIGHTSHADE-1.500.000-ADOPTION.md` for the reconciliation and limits.
+Original source notices are retained; no Sony SDK files or game material are added.

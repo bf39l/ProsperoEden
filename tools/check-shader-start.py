@@ -66,7 +66,12 @@ with tempfile.TemporaryDirectory(prefix='eden-shader-start-') as work:
             assert text.count(call) == 1 and '#include "shader_start.h"' in text, call
             assert 'Eden::Crash::Doing eden_doing' in text
             assert '#include "pipeline_identity.h"' in text
-        assert 'PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes)' in graphics
+        assert 'PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes, eden_spirv)' in graphics
+        # Hashes must travel with the deferred build, not be read from the worker's TLS.
+        assert 'eden_spirv = ::Eden::PipelineIdentity::TakeSpirv()] {' in graphics
+        begin_spirv = cache.index('::Eden::PipelineIdentity::BeginSpirv();')
+        note_spirv = cache.index('::Eden::PipelineIdentity::NoteSpirv(stage_index, code);', begin_spirv)
+        assert begin_spirv < note_spirv < cache.index('modules[stage_index] =', note_spirv)
         assert 'PipelineIdentity::Compute(*pipeline, shader_hash)' in compute
 
         def section(text, begin, end):

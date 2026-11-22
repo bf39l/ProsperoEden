@@ -36,8 +36,15 @@ inline bool PcWanted(std::uint64_t* seen) {
 }
 inline bool PcToStderr(std::uint64_t n) { return n <= 4; }
 
+// One render snapshot among the first 32 unmapped reads, independent of stderr line limits.
+inline std::atomic<bool>& RenderCaptured() {
+    static std::atomic<bool> captured{false};
+    return captured;
+}
+
 // A new session counts from the start (main.cpp).
 inline void Reset() {
+    RenderCaptured().store(false, std::memory_order_relaxed);
     Count().store(0, std::memory_order_relaxed);
     PcCount().store(0, std::memory_order_relaxed);
 }

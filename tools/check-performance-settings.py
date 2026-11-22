@@ -7,6 +7,9 @@ them for the game it starts and hands each one to the emulator, outside the deve
 dev-settings block, and that the block list is off unless the settings turn it on.
 """
 from pathlib import Path
+import os
+import subprocess
+import tempfile
 
 root = Path(__file__).resolve().parents[1]
 main = (root / 'headless/main.cpp').read_text()
@@ -67,16 +70,71 @@ assert 'inline constexpr int kSpeedLimitPercent[] = {100, ' in store
 assert 'int speed_limit = 0;' in store
 assert 'Eden::PerformanceSettings speed = Eden::LoadPerformance(0);' in save
 assert 'Eden::SavePerformance(0, speed)' in save
-# The console memory a game is told it has ("memory_layout", for a mod that keeps a heap of its
-# own). Every session starts at the Switch's own 4 GiB, and the game's choice replaces it before
-# the emulator is built, because that is when the guest's memory block is taken.
+# Every session resets to 4 GiB. After the game's settings and enabled mods
+# are known, the compatibility guard chooses the layout before Core construction.
 assert 'Settings::values.memory_layout_mode = Settings::MemoryLayout::Memory_4Gb;' in release
 layout = release.index('Settings::values.memory_layout_mode =\n')
-assert read < layout < release.index('Core::System system;')
-for case in ('speed.memory_layout == 1 ? Settings::MemoryLayout::Memory_6Gb',
-             'speed.memory_layout == 2 ? Settings::MemoryLayout::Memory_8Gb',
+mods = release.index('const auto all_mods = Eden::Mods::List(')
+guard = release.index('const int layout = Eden::MemoryLayoutGuard::Layout(')
+assert read < mods < guard < layout < release.index('Core::System system;')
+assert 'title, speed.memory_layout, mods_on,' in release[guard:layout]
+assert 'dev_layout_guard_off' in release[guard:layout]
+selection = release[release.index('            const bool mods_on =', mods):layout]
+assert 'Eden::Mods::CheatsOnly(mod)' in selection
+assert 'std::find(mods_off.begin(), mods_off.end(), mod.name) == mods_off.end()' in selection
+layout_end = release.index(';', layout) + 1
+assignment = release[layout:layout_end]
+for case in ('layout == 1 ? Settings::MemoryLayout::Memory_6Gb',
+             'layout == 2 ? Settings::MemoryLayout::Memory_8Gb',
              'Settings::MemoryLayout::Memory_4Gb;'):
-    assert case in release[layout:layout + 600], case
+    assert case in assignment, case
+# Execute the actual session selection/assignment with the real policy header.
+# This catches bypassing the guard, ignoring disabled mods or treating cheats as mods.
+code = r'''
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <string>
+#include <vector>
+#include "memory_layout_guard.h"
+namespace Settings {
+enum class MemoryLayout {Memory_4Gb,Memory_6Gb,Memory_8Gb};
+inline struct {MemoryLayout memory_layout_mode;} values;
+}
+namespace Eden::Mods {
+struct Mod {std::string name;bool cheats=false;};
+bool CheatsOnly(const Mod& mod){return mod.cheats;}
+}
+Settings::MemoryLayout Select(std::uint64_t title,int chosen,
+    const std::vector<Eden::Mods::Mod>& all_mods,const std::vector<std::string>& mods_off,
+    bool dev_layout_guard_off=false){
+    struct {int memory_layout;} speed{chosen};
+'''+selection+assignment+r'''
+return Settings::values.memory_layout_mode;
+}
+int main(){
+ constexpr std::uint64_t totk=0x0100F2C0115B6000,ff=0x0100B8A026F14000;
+ using L=Settings::MemoryLayout;
+ assert(Select(totk,2,{}, {})==L::Memory_4Gb);
+ assert(Select(totk,1,{}, {})==L::Memory_4Gb);
+ assert(Select(totk,0,{}, {})==L::Memory_4Gb);
+ assert(Select(ff,2,{}, {})==L::Memory_8Gb);
+ assert(Select(ff,1,{}, {})==L::Memory_6Gb);
+ assert(Select(totk,1,{{"mod",false}}, {})==L::Memory_6Gb);
+ assert(Select(totk,2,{{"mod",false}}, {})==L::Memory_8Gb);
+ assert(Select(totk,2,{{"mod",false}}, {"mod"})==L::Memory_4Gb);
+ assert(Select(totk,2,{{"cheats",true}}, {})==L::Memory_4Gb);
+ assert(Select(totk,2,{}, {},true)==L::Memory_8Gb);
+ assert(Select(totk,1,{{"mod",false}}, {"mod"},true)==L::Memory_6Gb);
+}
+'''
+with tempfile.TemporaryDirectory() as tmp:
+    tmp=Path(tmp);cpp=tmp/'layout.cpp';exe=tmp/'layout'
+    cpp.write_text(code)
+    subprocess.run([os.environ.get('CXX','c++'),'-std=c++20','-Wall','-Wextra','-Werror',
+                    '-fsanitize=address,undefined','-I'+str(root/'headless'),
+                    str(cpp),'-o',str(exe)],check=True)
+    subprocess.run([str(exe)],check=True)
 assert 'Memory layout: ' in release  # the session says which one it uses
 assert 'inline constexpr const char* kMemoryLayoutKeys[] = {"4Gb", "6Gb", "8Gb"};' in store
 assert 'int memory_layout = 0;' in store

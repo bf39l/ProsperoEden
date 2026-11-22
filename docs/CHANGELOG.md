@@ -2,6 +2,24 @@
 
 What changed in each release of ProsperoEden, newest first. A release's notes on GitHub are its section here.
 
+## v1.000.002
+
+### Engine, memory and compatibility
+
+- Adopt and rebase Nightshade 1.500.000 engine fixes while retaining Eden `d85bad89`, our existing FF safeguards and the 64-file VFS cache.
+- Fix storage-binding size wraparound, parentless texture-view scaling, storage CAS retry reads and address-space reuse/freeing defects.
+- Preserve guest PCM before sink processing; add audio underrun accounting/fade, isolated rasterizer-read scratch, block-row texture conversion and bounded async decoder payload/lifetime handling.
+- Fix the generated PS5 six-stage shader loader, integer descriptor metadata merging, panic-register overflow guards and buffer range overflow checks. Improve shader discovery/retry and retain conservative multi-title decoder/TIC handling.
+- Add emitted-SPIR-V pipeline identities, a synchronous-GPU diagnostic switch and Nightshade's unmodded TOTK memory-layout guard. Existing startup scanning and launcher behavior are retained.
+- Advance the internal Vulkan shader-cache revision; old incompatible cache entries rebuild automatically. The first launch may compile shaders again.
+
+### Credits and validation
+
+- Thank Oliv3rmoon and Nightshade contributors for their detailed audit, fixes and regression tests; retain original fork and upstream attribution.
+- Adoption code passed PS5 compile/link/package validation in Docker at version 1.000.001, plus focused sanitizer and SPIR-V regressions. The documented Apple Silicon source-check skip remains in effect; this is not a full-suite pass.
+- Version 1.000.002 is prepared for the user's Docker build and console testing. Remaining FF graphics artifacts, GPU device loss and suspected remap races are not claimed resolved.
+- See [the adoption review](NIGHTSHADE-1.500.000-ADOPTION.md) for the audit dispositions and FF test plan.
+
 ## v1.000.001
 
 ### Engine and compatibility

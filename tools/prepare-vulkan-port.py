@@ -1,24 +1,56 @@
 """Adapt the pinned Eden Vulkan platform boundary and required renderer fixes."""
 from pathlib import Path
 import struct
+import re
 import subprocess
 import sys
 source, output = map(Path, sys.argv[1:])
 port = Path(__file__).resolve().parents[1] / 'headless'
-def adapt(relative, destination, replacements):
+def adapt(relative, destination, replacements, finalizer=None):
     text = (source / relative).read_text()
     for old, new in replacements:
         if text.count(old) != 1:
             raise RuntimeError(f"Pinned Vulkan anchor changed: {relative}: {old[:60]}")
         text = text.replace(old, new)
+    if finalizer is not None:
+        text = finalizer(text)
     path = output / destination
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists() or path.read_text() != text:
         path.write_text(text)
 
+def async_base_lifetime(base):
+    # The worker's jthreads cancel queued work and join the active callback on destruction.
+    # Destroy it first, while every callback context, payload reservation and budget is alive.
+    worker = ('    Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},\n'
+              '                                               Common::ThreadPlacement::Efficiency};\n')
+    class_end = '\n};\n\n} // namespace VideoCommon'
+    if base.count(worker) != 1 or base.count(class_end) != 1:
+        raise RuntimeError('Pinned async decoder worker/member boundary changed')
+    base = base.replace(worker, '')
+    base = base.replace(class_end,
+                        '\n    // Last member: stop/join callbacks before their contexts and budget die.\n' +
+                        worker + class_end)
+    return base
+
+
+def async_cache_lifetime(cache):
+    begin = cache.index('void TextureCache<P>::TickAsyncDecode() {')
+    end = cache.index('\ntemplate <class P>', begin)
+    tick = cache[begin:end]
+    tick, count = re.subn(r'(?m)^(\s*)i = async_decodes\.erase\(i\);',
+                         r'\1lock.unlock();\n\1i = async_decodes.erase(i);', tick)
+    if count == 0:
+        raise RuntimeError('Pinned async decoder completion erase changed')
+    return cache[:begin] + tick + cache[end:]
+
 adapt('src/core/frontend/emu_window.h', 'include/core/frontend/emu_window.h',
       [('    Xcb,', '    Xcb,\n    PS5,')])
 adapt('src/video_core/renderer_vulkan/vk_rasterizer.cpp', 'vulkan_rasterizer.cpp', [
+    ('        buffer->MarkUsage(offset, 12);\n',
+     '        buffer->MarkUsage(offset, 12);\n'
+     '        ::Eden::IndirectDrawLog::IndirectDispatchRead(\n'
+     '            *indirect_address, gpu_memory->IsMemoryDirty(*indirect_address, 12));\n'),
     # Compute synchronization (dev_vulkan.h compute_barriers): indirect
     # dispatches returned before the pre-dispatch barrier, and no barrier made a dispatch's
     # writes visible to later indirect arguments, vertex/index fetch, shaders or copies.
@@ -74,7 +106,7 @@ void RasterizerVulkan::DispatchCompute() {"""),
     # when the guest enables occlusion counting.
     ('const bool can_defer_clear = ENABLE_DEFERRED_CLEAR &&',
      'const bool can_defer_clear = ENABLE_DEFERRED_CLEAR && !regs.zpass_pixel_count_enable &&'),
-    ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"'),
+    ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n#include "indirect_draw_log.h"'),
     # Guest threads take the cache locks here (tracked-page writes, flush-area reads).
     ('bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {',
      'bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {\n    ::Eden::Performance::Timer guest_write_timer(::Eden::Performance::guest_cpu_write);'),
@@ -1415,6 +1447,7 @@ texture_partial = [
      '    }\n'
      '    ' + VULKAN_CACHE + '\n' + (port / 'texture_partial_refresh.inc').read_text() + '    }\n'),
 ]
+adapt('src/video_core/texture_cache/texture_cache_base.h', 'vulkan-cache/video_core/texture_cache/texture_cache_base.h', [('#include <atomic>', '#include <atomic>\n#include "astc_decode_budget.h"'), ('struct AsyncDecodeContext {', 'struct AsyncDecodeContext {\n    ::Eden::AstcPolicy::DecodeBudget::Reservation payload;'), ('    void QueueAsyncDecode(Image& image, ImageId image_id);', '    void QueueAsyncDecode(Image& image, ImageId image_id,\n                          ::Eden::AstcPolicy::DecodeBudget::Reservation payload);'), ('    std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;', '    ::Eden::AstcPolicy::DecodeBudget astc_decode_budget;\n    std::vector<std::unique_ptr<AsyncDecodeContext>> async_decodes;')], finalizer=async_base_lifetime)
 adapt('src/video_core/texture_cache/texture_cache.h',
       'vulkan-cache/video_core/texture_cache/texture_cache.h', [
     ('namespace VideoCommon {', '#include "performance.h"\n#include "texture_partial.h"\n#include "image_pages.h"\n#include "astc_policy.h"\n#include "texture_evictions.h"\n#include "staging_chunks.h"\n#include "reactive_flush_log.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }\n\nnamespace VideoCommon {'),
@@ -1463,65 +1496,13 @@ adapt('src/video_core/texture_cache/texture_cache.h',
      '        const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span);\n'
      '        ::Eden::StagingChunks::UploadStaged(image, staging, copies);\n'),
     # An ASTC texture converted in the background is in the heap already: staged in pieces too.
-    ('        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));\n'
-     '        std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),\n'
-     '                    async_decode->decoded_data.size());\n'
-     '        image.UploadMemory(staging, async_decode->copies);\n',
-     '        bool staged_in_pieces = false;\n'
-     '        ' + VULKAN_CACHE + '\n'
-     '            if (::Eden::StagingChunks::Chunked(MapSizeBytes(image))) {\n'
-     '                ::Eden::StagingChunks::Host<Runtime> host{\n'
-     '                    std::span<u8>(async_decode->decoded_data.data(), async_decode->decoded_data.size()), &runtime};\n'
-     '                ::Eden::StagingChunks::UploadStaged(image, host, async_decode->copies);\n'
-     '                ::Eden::StagingChunks::Said(MapSizeBytes(image));\n'
-     '                staged_in_pieces = true;\n'
-     '            }\n'
-     '        }\n'
-     '        if (!staged_in_pieces) {\n'
-     '        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));\n'
-     '        std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),\n'
-     '                    async_decode->decoded_data.size());\n'
-     '        image.UploadMemory(staging, async_decode->copies);\n'
-     '        }\n'
-     '        ' + VULKAN_CACHE + '\n'
-     '            auto& in_flight = ::Eden::Performance::astc_background_bytes;\n'
-     '            in_flight -= (std::min)(in_flight, static_cast<unsigned long long>(MapSizeBytes(image)));\n'
-     '        }\n'),
+    ('        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));\n        std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),\n                    async_decode->decoded_data.size());\n        image.UploadMemory(staging, async_decode->copies);\n', '        bool staged_in_pieces = false;\n        if constexpr (std::is_same_v<Runtime, Vulkan::TextureCacheRuntime>) {\n            if (::Eden::StagingChunks::Chunked(MapSizeBytes(image))) {\n                ::Eden::StagingChunks::Host<Runtime> host{\n                    std::span<u8>(async_decode->decoded_data.data(), async_decode->decoded_data.size()), &runtime};\n                ::Eden::StagingChunks::UploadStaged(image, host, async_decode->copies);\n                ::Eden::StagingChunks::Said(MapSizeBytes(image));\n                staged_in_pieces = true;\n            }\n        }\n        if (!staged_in_pieces) {\n        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));\n        std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),\n                    async_decode->decoded_data.size());\n        image.UploadMemory(staging, async_decode->copies);\n        }\n'),
     # An ASTC texture kept as BC3 is converted in the background in a busy frame, and on a light
     # one when it is larger than a screen picture; otherwise in place (headless/astc_policy.h). A
     # light frame's background conversions and the conversions in place that held the frame for
     # 16 ms or more are logged (EDEN_ASTC_BACKGROUND, EDEN_ASTC_IN_PLACE; Oliv3rmoon/Nightshade#3).
     # The frame is counted where the texture cache ends its own.
-    ('    if (True(image.flags & ImageFlagBits::AsynchronousDecode)) {\n        QueueAsyncDecode(image, image_id);\n        return;\n    }',
-     '    if (True(image.flags & ImageFlagBits::AsynchronousDecode) && ::Eden::AstcPolicy::InBackground(MapSizeBytes(image)) &&\n'
-     # A light frame's conversions in flight are bounded (headless/memory_budget.h).
-     '        (::Eden::AstcPolicy::Busy() || ::Eden::Performance::LightBackgroundRoom(MapSizeBytes(image)))) {\n'
-     '        ::Eden::Performance::astc_background_bytes += MapSizeBytes(image);\n'
-     '        if (!::Eden::AstcPolicy::Busy() && ::Eden::AstcPolicy::ReportLightBackground()) {\n'
-     '            std::printf("EDEN_ASTC_BACKGROUND texels=%u size=%ux%u layers=%u levels=%u draws=%u count=%u\\n",\n'
-     '                        MapSizeBytes(image), image.info.size.width, image.info.size.height,\n'
-     '                        static_cast<unsigned>(image.info.resources.layers),\n'
-     '                        static_cast<unsigned>(image.info.resources.levels),\n'
-     '                        ::Eden::AstcPolicy::Draws(), ::Eden::AstcPolicy::light_background);\n'
-     '        }\n'
-     '        QueueAsyncDecode(image, image_id);\n'
-     '        return;\n'
-     '    }\n'
-     '    const long long eden_astc_start =\n'
-     '        True(image.flags & ImageFlagBits::AsynchronousDecode) ? ::Eden::Performance::NowNs() : 0;\n'
-     '    SCOPE_EXIT {\n'
-     '        if (eden_astc_start == 0) return;\n'
-     '        const long long held = ::Eden::Performance::NowNs() - eden_astc_start;\n'
-     '        if (::Eden::AstcPolicy::ReportSlowInPlace(held)) {\n'
-     '            std::printf("EDEN_ASTC_IN_PLACE ms=%.1f texels=%u size=%ux%u layers=%u levels=%u draws=%u "\n'
-     '                        "slow=%u slow_ms=%.0f\\n", static_cast<double>(held) / 1e6, MapSizeBytes(image),\n'
-     '                        image.info.size.width, image.info.size.height,\n'
-     '                        static_cast<unsigned>(image.info.resources.layers),\n'
-     '                        static_cast<unsigned>(image.info.resources.levels), ::Eden::AstcPolicy::Draws(),\n'
-     '                        ::Eden::AstcPolicy::slow_in_place,\n'
-     '                        static_cast<double>(::Eden::AstcPolicy::slow_in_place_ns) / 1e6);\n'
-     '        }\n'
-     '    };'),
+    ('    if (True(image.flags & ImageFlagBits::AsynchronousDecode)) {\n        QueueAsyncDecode(image, image_id);\n        return;\n    }', '    if (True(image.flags & ImageFlagBits::AsynchronousDecode) &&\n        ::Eden::AstcPolicy::InBackground(MapSizeBytes(image))) {\n        const auto input_bytes = static_cast<unsigned long long>(image.unswizzled_size_bytes);\n        const auto output_bytes = static_cast<unsigned long long>(MapSizeBytes(image));\n        const auto payload = ::Eden::AstcPolicy::DecodePayload(\n            input_bytes, output_bytes, image.info.size.width, image.info.size.height);\n        auto reservation = payload ? astc_decode_budget.Reserve(*payload, ::Eden::AstcPolicy::Busy())\n                                   : std::nullopt;\n        if (!::Eden::AstcPolicy::Busy() && ::Eden::AstcPolicy::ReportLightBackground()) {\n            std::printf("EDEN_ASTC_BACKGROUND texels=%u size=%ux%u layers=%u levels=%u draws=%u "\n                        "count=%u admitted=%d input=%llu output=%llu payload=%llu pending=%llu\\n",\n                        MapSizeBytes(image), image.info.size.width, image.info.size.height,\n                        static_cast<unsigned>(image.info.resources.layers),\n                        static_cast<unsigned>(image.info.resources.levels),\n                        ::Eden::AstcPolicy::Draws(), ::Eden::AstcPolicy::light_background,\n                        int(reservation.has_value()), input_bytes, output_bytes,\n                        static_cast<unsigned long long>(payload.value_or(0)),\n                        static_cast<unsigned long long>(astc_decode_budget.Held()));\n        }\n        if (reservation) {\n            QueueAsyncDecode(image, image_id, std::move(*reservation));\n            return;\n        }\n    }\n    const long long eden_astc_start =\n        True(image.flags & ImageFlagBits::AsynchronousDecode) ? ::Eden::Performance::NowNs() : 0;\n    SCOPE_EXIT {\n        if (eden_astc_start == 0) return;\n        const long long held = ::Eden::Performance::NowNs() - eden_astc_start;\n        if (::Eden::AstcPolicy::ReportSlowInPlace(held)) {\n            std::printf("EDEN_ASTC_IN_PLACE ms=%.1f texels=%u size=%ux%u layers=%u levels=%u draws=%u "\n                        "slow=%u slow_ms=%.0f\\n", static_cast<double>(held) / 1e6, MapSizeBytes(image),\n                        image.info.size.width, image.info.size.height,\n                        static_cast<unsigned>(image.info.resources.layers),\n                        static_cast<unsigned>(image.info.resources.levels), ::Eden::AstcPolicy::Draws(),\n                        ::Eden::AstcPolicy::slow_in_place,\n                        static_cast<double>(::Eden::AstcPolicy::slow_in_place_ns) / 1e6);\n        }\n    };'),
     ('    TickAsyncDecode();\n    TickAsyncUnswizzle();', '    ::Eden::AstcPolicy::Frame();\n    TickAsyncDecode();\n    TickAsyncUnswizzle();'),
     # Every 10 s at most, what the collector freed because memory was short (texture_evictions.h).
     ('    sentenced_images.Tick();\n',
@@ -1555,7 +1536,13 @@ adapt('src/video_core/texture_cache/texture_cache.h',
     # critical threshold and minimum 1 GiB spacing. OpenGL remains unchanged.
     ('const s64 min_vacancy_expected = (6 * mem_threshold) / 10;',
      'const s64 min_vacancy_expected =\n            ((std::is_same_v<Runtime, Vulkan::TextureCacheRuntime> ? 4 : 6) * mem_threshold) / 10;'),
-] + texture_partial + texture_costs)
+    ('void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {', 'void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id,\n                                     ::Eden::AstcPolicy::DecodeBudget::Reservation payload) {'),
+    ('    auto* decode_ptr = decode.get();', '    decode->payload = std::move(payload);\n    auto* decode_ptr = decode.get();'),
+    ('    image.flags |= ImageFlagBits::IsDecoding;\n    auto decode = std::make_unique<AsyncDecodeContext>();', '    auto decode = std::make_unique<AsyncDecodeContext>();'),
+    ('    decode->image_id = image_id;\n    async_decodes.push_back(std::move(decode));', '    decode->image_id = image_id;'),
+    ('    texture_decode_worker.QueueWork(std::move(func));', '    async_decodes.push_back(std::move(decode));\n    bool submitted = false;\n    SCOPE_EXIT { if (!submitted) async_decodes.pop_back(); };\n    texture_decode_worker.QueueWork(std::move(func));\n    submitted = true;\n    image.flags |= ImageFlagBits::IsDecoding;'),
+    ('        ConvertImage(input, info, async_decode->decoded_data, copies_span);', '        ConvertImage(input, info, async_decode->decoded_data, copies_span);\n        // Drop the closure input before publishing completion to the upload thread.\n        std::vector<u8>{}.swap(input);'),
+] + texture_partial + texture_costs, finalizer=async_cache_lifetime)
 
 # ASTC recompressed to BC1 or BC3 a layer at a time, as headless/CMakeLists.txt makes Eden's own
 # util.cpp do: this copy is the one the Vulkan build links, and it decoded a whole mip level of
@@ -1573,8 +1560,8 @@ recompress_old = '''            decode_scratch.resize_destructive(level_size);
                      copy.image_subresource.num_layers * copy.image_extent.depth,
                      output.subspan(output_offset));
 '''
-recompress_new = '''            // A layer at a time (headless/CMakeLists.txt): ASTC blocks are 16 bytes, BC blocks
-            // cover 4x4 pixels.
+recompress_new = '''            // Keep one RGBA scratch layer. Workers decode and compress matching ASTC and BCn
+            // block rows together before the next layer reuses that scratch.
             const u32 layers = copy.image_subresource.num_layers * copy.image_extent.depth;
             const u32 layer_input = Common::DivideUp(copy.image_extent.width, tile_size.width) *
                                     Common::DivideUp(copy.image_extent.height, tile_size.height) * 16;
@@ -1582,14 +1569,21 @@ recompress_new = '''            // A layer at a time (headless/CMakeLists.txt): 
                                      Common::AlignUp(copy.image_extent.height, 4) / bpp_div;
             decode_scratch.resize_destructive(level_size / (std::max)(layers, 1u));
             for (u32 layer = 0; layer < layers; ++layer) {
-                Tegra::Texture::ASTC::Decompress(
-                    input_offset.subspan(layer * layer_input), copy.image_extent.width,
-                    copy.image_extent.height, 1, tile_size.width, tile_size.height, decode_scratch);
-                compress(decode_scratch, copy.image_extent.width, copy.image_extent.height, 1,
-                         output.subspan(output_offset + layer * layer_output));
+                Tegra::Texture::BCN::TranscodeASTCLayer(
+                    input_offset.subspan(layer * layer_input, layer_input), copy.image_extent.width,
+                    copy.image_extent.height, tile_size.width, tile_size.height, bc1, decode_scratch,
+                    output.subspan(output_offset + layer * layer_output, layer_output));
             }
 '''
 adapt('src/video_core/texture_cache/util.cpp', 'texture_util.cpp', [
+    ('#include <vector>', '#include <cstring>\n#include <vector>\n#include "texture_partial.h"'),
+    ('''            const auto compress = recompression_setting == Settings::AstcRecompression::Bc1
+                                      ? Tegra::Texture::BCN::CompressBC1
+                                      : Tegra::Texture::BCN::CompressBC3;
+            const auto bpp_div = recompression_setting == Settings::AstcRecompression::Bc1 ? 2 : 1;
+''', '''            const bool bc1 = recompression_setting == Settings::AstcRecompression::Bc1;
+            const auto bpp_div = bc1 ? 2 : 1;
+'''),
     ('#include <vector>', '#include <cstring>\n#include <vector>\n#include "texture_partial.h"'),
     (recompress_old, recompress_new),
     # Every converted copy says how many bytes it is: Eden set buffer_size only for ASTC kept as
@@ -1619,8 +1613,23 @@ adapt('src/video_core/texture_cache/util.cpp', 'texture_util.cpp', [
 # the texture-buffer loop looked like the cost of bind and measured 2.8%.
 adapt('src/video_core/buffer_cache/buffer_cache.h',
       'vulkan-cache/video_core/buffer_cache/buffer_cache.h', [
+    ('        const Binding& binding = channel_state->storage_buffers[stage][index];',
+     '        const Binding& binding = channel_state->storage_buffers[stage][index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"graphics-storage", static_cast<unsigned>(stage), index};'),
+    ('        const Binding& binding = channel_state->compute_storage_buffers[index];',
+     '        const Binding& binding = channel_state->compute_storage_buffers[index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"compute-storage", 0, index};'),
+    ('        const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];',
+     '        const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"graphics-image-buffer", static_cast<unsigned>(stage), index};'),
+    ('        const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];',
+     '        const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];\n'
+     '        ::Eden::IndirectDrawLog::BindingScope eden_binding{"compute-image-buffer", 0, index};'),
+    ('void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {',
+     'void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {\n'
+     '    ::Eden::IndirectDrawLog::GpuWriteTracked(device_addr, size, needs_sync);'),
     ('#include "video_core/buffer_cache/buffer_cache_base.h"',
-     '#include "video_core/buffer_cache/buffer_cache_base.h"\n#include "performance.h"\n#include "staging_chunks.h"'),
+     '#include "video_core/buffer_cache/buffer_cache_base.h"\n#include "performance.h"\n#include "staging_chunks.h"\n#include "indirect_draw_log.h"'),
     # A buffer's upload or download of more than 64 MiB is staged in pieces (headless/staging_chunks.h).
     ('    if constexpr (USE_MEMORY_MAPS) {\n'
      '        auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);\n',
@@ -1767,12 +1776,12 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
     # Once the pipeline exists, Eden's hashes beside its VkPipeline on stderr
     # (headless/pipeline_identity.h): the driver's stall dump names the handle whose shader the
     # GPU stopped in.
-    identity = ('::Eden::PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes);'
+    identity = ('::Eden::PipelineIdentity::Graphics(*pipeline, key.Hash(), key.unique_hashes, eden_spirv);'
                 if name == 'vk_graphics_pipeline' else
                 '::Eden::PipelineIdentity::Compute(*pipeline, shader_hash);')
     anchors = [
         ('#include <algorithm>', '#include <algorithm>\n#include "performance.h"\n#include "pipeline_identity.h"\n'
-                                 '#include "shader_start.h"\n#include "crash_report.h"'),
+                                 '#include "shader_start.h"\n#include "crash_report.h"\n#include "indirect_draw_log.h"'),
         ('            std::unique_lock lock{build_mutex};',
          '            auto timer = Eden::Performance::VulkanTimer(16);\n            std::unique_lock lock{build_mutex};'),
         ('            pipeline_statistics->Collect(device, *pipeline);\n        }\n',
@@ -1786,7 +1795,8 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
              '      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {\n'
              '    ::Eden::ShaderStart::Clock eden_layout{::Eden::ShaderStart::layout};\n'),
             ('    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics] {',
-             '    eden_layout.Stop();\n    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics] {'),
+             '    eden_layout.Stop();\n    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,\n'
+             '                eden_spirv = ::Eden::PipelineIdentity::TakeSpirv()] {'),
         ]
     else:
         anchors += [
@@ -1796,6 +1806,45 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
             ('    auto func{[this, shader_notify, pipeline_statistics] {',
              '    eden_layout.Stop();\n    auto func{[this, shader_notify, pipeline_statistics] {'),
         ]
+    if name == 'vk_graphics_pipeline':
+        anchors.append(('bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {',
+                        'bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {\n'
+                        '    ::Eden::IndirectDrawLog::ProducerScope eden_producer{"graphics", key.Hash(), key.unique_hashes};'))
+    else:
+        anchors.append(('                                BufferCache& buffer_cache, TextureCache& texture_cache) {\n',
+                        '                                BufferCache& buffer_cache, TextureCache& texture_cache) {\n'
+                        '    ::Eden::IndirectDrawLog::ProducerScope eden_producer{"compute", 0, {}, shader_hash};\n'
+                        '    const bool eden_counter_probe = ::Eden::IndirectDrawLog::CounterProbeWanted(shader_hash);\n'))
+    if name == 'vk_compute_pipeline':
+        anchors.append(('            buffer_cache.BindComputeTextureBuffer(index, image_view.GpuAddr(),',
+                        """            if (eden_counter_probe) {
+                const auto eden_cpu = gpu_memory.GpuToCpuAddress(image_view.GpuAddr());
+                ::Eden::IndirectDrawLog::CounterBinding eden_binding{};
+                eden_binding.shader = shader_hash;
+                eden_binding.slot = static_cast<u32>(index);
+                eden_binding.handle = views[index].index;
+                eden_binding.cbuf = desc.cbuf_index;
+                eden_binding.offset = desc.cbuf_offset;
+                eden_binding.count = desc.count;
+                eden_binding.gpu = image_view.GpuAddr();
+                eden_binding.cpu = eden_cpu ? *eden_cpu : 0;
+                eden_binding.mapped = eden_cpu.has_value();
+                eden_binding.bytes = image_view.BufferSize();
+                eden_binding.view_format = static_cast<int>(image_view.format);
+                eden_binding.bound_format = static_cast<int>(format);
+                eden_binding.image = is_image;
+                eden_binding.written = is_written;
+                eden_binding.read = true;
+                if constexpr (is_image) {
+                    eden_binding.read = desc.is_read;
+                    eden_binding.integer = desc.is_integer;
+                    eden_binding.shader_format = static_cast<u32>(desc.format);
+                } else {
+                    eden_binding.integer = desc.is_integer;
+                }
+                ::Eden::IndirectDrawLog::ProbeCounterBinding(eden_binding);
+            }
+            buffer_cache.BindComputeTextureBuffer(index, image_view.GpuAddr(),"""))
     if name == 'vk_graphics_pipeline':
         anchors += configure_phases
     # While the driver compiles the pipeline, a crash report names it after the thread
@@ -1811,8 +1860,19 @@ for name in ('vk_graphics_pipeline', 'vk_compute_pipeline'):
                         '            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);\n'))
     adapt(f'src/video_core/renderer_vulkan/{name}.cpp', name + '_cost.cpp', anchors)
 shader_costs = [
+    ('    LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);\n    size_t env_index{0};\n',
+     '    LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);\n    ::Eden::PipelineIdentity::BeginSpirv();\n    size_t env_index{0};\n'),
+    ('        device.SaveShader(code);\n        modules[stage_index] = ',
+     '        device.SaveShader(code);\n        ::Eden::PipelineIdentity::NoteSpirv(stage_index, code);\n        modules[stage_index] = '),
+    # Keep the newer engine's side-effect/depth rules and add Nightshade's one-off target rule.
+
+    # New shader metadata includes integer texel-buffer formats; old file environments
+    # did not record them. Use a PS5-specific internal cache version, not an app version.
+    ('constexpr u32 CACHE_VERSION = 19;', 'constexpr u32 CACHE_VERSION = 0x50530015;'),
+    ('    host_info.ApplyDescriptorLimitPolicy();',
+     '    host_info.support_integer_texture_buffers = true;\n    host_info.ApplyDescriptorLimitPolicy();'),
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include <set>\n#include <unordered_set>\n'
-     '#include "performance.h"\n#include "dev_vulkan.h"\n#include "diagnostics.h"'),
+     '#include "performance.h"\n#include "dev_vulkan.h"\n#include "diagnostics.h"\n#include "pipeline_identity.h"'),
     # For testing a game that stops the GPU (dev_vulkan.h coherent_storage, from a game's
     # "gpu_debug" or dev-settings): more of its storage buffers device-coherent (Eden patch 10). The
     # profile is made with the renderer, after the session has set the switch. Eden builds every
@@ -1991,7 +2051,7 @@ for statement in (
     'Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);',
     'Shader::Maxwell::Flow::CFG cfg{env, pools.flow_block, env.StartAddress()};',
 ):
-    expected = 2 if 'cfg_offset' in statement else 1  # graphics exception dump too
+    expected = 1  # Exception dumps use captured bytes without re-decoding a CFG.
     if shader_source.count(statement) != expected:
         raise RuntimeError(f'Shader CFG anchor changed: {statement}')
     shader_source = shader_source.replace(statement,
@@ -2288,6 +2348,11 @@ def loader_body(filter_block):
                                                         std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        const auto expected_envs = static_cast<size_t>(std::ranges::count_if(
+            key.unique_hashes, [](u64 value) { return value != 0; }));
+        if (expected_envs != envs.size()) {
+            throw std::ios_base::failure("Graphics shader key/environment count mismatch");
+        }
         const u64 hash = key.Hash();
         loader->Note(hash, false, static_cast<u64>(file.tellg()));
 
@@ -2301,7 +2366,7 @@ def loader_body(filter_block):
                 return;
             }
             ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram> env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }

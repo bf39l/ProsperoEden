@@ -23,5 +23,9 @@ macro_replace("    mov(Common::X64::ABI_PARAM1, qword[STATE + offsetof(JITState,
     "    mov(Common::X64::ABI_PARAM3.cvt32(), value);\n    mov(Common::X64::ABI_PARAM2.cvt32(), METHOD_ADDRESS);\n    mov(Common::X64::ABI_PARAM1, STATE);")
 macro_replace("    Common::X64::ABI_PopRegistersAndAdjustStack(*this, PersistentCallerSavedRegs(), 0);\n\n    Xbyak::Label dont_process{};"
     "    Common::X64::ABI_PopRegistersAndAdjustStack(*this, PersistentCallerSavedRegs(), 0);\n    cmp(byte[STATE + offsetof(JITState, failed)], 0);\n    jne(end_of_code, T_NEAR);\n\n    Xbyak::Label dont_process{};")
+include("${EDEN_PORT_DIR}/indirect_draw_guard.cmake")
+set(DRAW_TRACE_MACRO TRUE)
+include("${EDEN_PORT_DIR}/indirect_draw_trace.cmake")
+unset(DRAW_TRACE_MACRO)
 file(WRITE "${MACRO_OUTPUT}.in" "${macro_source}")
 configure_file("${MACRO_OUTPUT}.in" "${MACRO_OUTPUT}" COPYONLY)
